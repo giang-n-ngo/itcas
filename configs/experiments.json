@@ -1,0 +1,87 @@
+{
+  "_comment": "Per-(problem, difficulty) experiment sizing for the ITCAS sweep. budget/batch_size/n_init scale with the problem (dimension, #objectives) and the difficulty (joint-feasible fraction), so they live here instead of in scripts/jobs.json (which only selects the sweep matrix: method x problem x difficulty x seeds). Resolution order for each field: problems[<problem>][<difficulty>] -> problems[<problem>].defaults -> top-level defaults. The <difficulty> key is the threshold_pct string (e.g. \"0.05\"); for uncalibrated/default-threshold runs the key is \"defaults\". eps_archive is the ε-Archive Size distance threshold in normalised objective space (0.05 = 5% of the normalised range). Owned jointly: the Slurm Operator wires it into the launcher; the Scientific Coder tunes the numbers.",
+  "defaults": {
+    "budget": 50,
+    "batch_size": 4,
+    "n_init": 12,
+    "eps_archive": 0.05
+  },
+  "problems": {
+    "alpine_12d": {
+      "_comment": "Benchmark 16 - 3-obj shifted Alpine N.1 (D=12, 3 obj). Non-differentiable kinks.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 24, "eps_archive": 1.0 }
+    },
+    "dixon_price_10d": {
+      "_comment": "Benchmark 14 - Dixon-Price vs Sphere (D=10, 2 obj). Ill-conditioned narrow valley.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 20, "eps_archive": 0.05 }
+    },
+    "dtlz1_12d": {
+      "_comment": "Benchmark 8 - contextual DTLZ1 (D=12, 4 obj). Rastrigin-based multi-modal context.",
+      "defaults": { "budget": 200, "batch_size": 8, "n_init": 24, "eps_archive": 1.0 }
+    },
+    "dtlz2_6d": {
+      "_comment": "Benchmark 4 - contextual DTLZ2 (D=6, 4 obj).",
+      "defaults": { "budget": 200, "batch_size": 8, "n_init": 12, "eps_archive": 1.0 }
+    },
+    "dtlz3_8d": {
+      "_comment": "Benchmark 11 - contextual DTLZ3 (D=8, 4 obj). Rastrigin-based multi-modal context.",
+      "defaults": { "budget": 200, "batch_size": 8, "n_init": 16, "eps_archive": 1.0 }
+    },
+    "dtlz4_12d": {
+      "_comment": "Benchmark 13 - contextual DTLZ4 (D=12, 3 obj). Biased density, alpha=100.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 24, "eps_archive": 0.2 }
+    },
+    "dtlz7_6d": {
+      "_comment": "Benchmark 6 - contextual DTLZ7 (D=6, 3 obj). Disconnected Pareto front.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 1.0 }
+    },
+    "ellipsoid_20d": {
+      "_comment": "Benchmark 7 - ill-conditioned ellipsoid (D=20, 2 obj). ARD/relevance diagnostic.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 40, "eps_archive": 0.01 }
+    },
+    "griewank_16d": {
+      "_comment": "Benchmark 15 - 4-obj shifted Griewank (D=16, 4 obj). Macro-convex micro-rugged.",
+      "defaults": { "budget": 200, "batch_size": 8, "n_init": 32, "eps_archive": 1.0 }
+    },
+    "levy_16d": {
+      "_comment": "Benchmark 10 - 3-obj shifted Levy (D=16, 3 obj). Rugged multimodal high-D.",
+      "defaults": { "budget": 200, "batch_size": 8, "n_init": 32, "eps_archive": 0.01 }
+    },
+    "multimodal_trap_20d": {
+      "_comment": "Benchmark 3 - rugged high-D stress test (D=20, 3 obj). Higher budget for dimension.",
+      "defaults": { "budget": 200, "batch_size": 8, "n_init": 40, "eps_archive": 0.01 }
+    },
+    "rosenbrock_sphere_6d": {
+      "_comment": "Benchmark 2 - contextual Rosenbrock vs sphere (D=6, 2 obj).",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.02 }
+    },
+    "spacecraft_formation_flying_a1": {
+      "_comment": "Real Basilisk/Slurm simulation (D=16, 3 constraints). n_init draws from pre-filtered historical pool. Difficulty keys 1–4 select (rmse_m, fuel_g, thrust_n) constraint thresholds; pass --threshold_pct 1|2|3|4.",
+      "defaults": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
+      "1": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
+      "2": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
+      "3": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
+      "4": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 }
+    },
+    "sphere2_6d": {
+      "_comment": "Benchmark 1 - 2-obj shifted sphere (D=6, 2 obj). Convex baseline.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.01 },
+      "0.2":  { "budget": 100, "batch_size": 4, "n_init": 12 },
+      "0.1":  { "budget": 100, "batch_size": 4, "n_init": 12 },
+      "0.05": { "budget": 100, "batch_size": 4, "n_init": 12 },
+      "0.01": { "budget": 100, "batch_size": 4, "n_init": 12 }
+    },
+    "styblinski_tang_6d": {
+      "_comment": "Benchmark 5 - multi-modal Styblinski-Tang (D=6, 2 obj). Multi-modal trap variant of sphere2_6d.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.01 }
+    },
+    "vlmop2_6d": {
+      "_comment": "Benchmark 12 - VLMOP2 (D=6, 2 obj). Vanishing gradient / flat landscape.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.05 }
+    },
+    "zdt3_6d": {
+      "_comment": "Benchmark 9 - contextual ZDT3 (D=6, 2 obj). Disconnected Pareto front.",
+      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.1 }
+    }
+  }
+}

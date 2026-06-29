@@ -1,0 +1,13 @@
+# Smoke-test config: tiny problem, small budget, runs in seconds.
+problem: two_circles_2d
+method: itcas
+budget: 12
+batch_size: 2
+n_init: 6
+n_candidates: 128
+n_ts_samples: 1
+seed: 0
+target_X: 5
+radius: 0.1
+out_dir: results/smoke
+run_name: itcas_smoke

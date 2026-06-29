@@ -1,0 +1,13 @@
+{
+    "problems": [
+        "alpine_12d",
+        "dtlz1_12d",
+        "dtlz3_8d",
+        "griewank_16d",
+        "levy_16d",
+        "multimodal_trap_20d",
+        "spacecraft_formation_flying_a1",
+        "styblinski_tang_6d",
+        "rosenbrock_sphere_6d"
+    ]
+}

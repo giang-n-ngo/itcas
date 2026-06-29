@@ -1,0 +1,14 @@
+# Benchmark 1: 2-Objective Shifted Sphere (D=6, d_x=3, d_w=3).
+# Small-budget example config for the C-MO-CAS synthetic suite.
+problem: sphere2_6d
+method: itcas
+budget: 40
+batch_size: 4
+n_init: 12
+n_candidates: 256
+n_ts_samples: 1
+seed: 0
+target_X: 10
+radius: 0.5
+out_dir: results/sphere2_6d
+run_name: itcas_sphere2_6d

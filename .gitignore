@@ -1,0 +1,16 @@
+/latex/proposal/
+/contexts/
+.github/
+results/
+scripts/
+slurm_logs/
+itcas/__pycache__/
+itcas/algorithms/__pycache__/
+itcas/baselines/__pycache__/
+itcas/io/__pycache__/
+itcas/metrics/__pycache__/
+itcas/pipeline/__pycache__/
+itcas/reporting/__pycache__/
+itcas/utils/__pycache__/
+test/__pycache__/
+*.pyc

@@ -1,0 +1,42 @@
+# ITCAS — Python environment requirements
+# =======================================
+# Active-search experiments built on BoTorch / GPyTorch.
+# Tested with Python 3.10.
+#
+# Install (CPU or existing CUDA torch already present):
+#     pip install -r requirements.txt
+#
+# GPU note:
+#   The experiments run on GPU when available (see `--device` / device="auto").
+#   `pip install torch` pulls the default build for your platform. To force a
+#   specific CUDA build, install torch first from the official index, e.g.:
+#     pip install torch --index-url https://download.pytorch.org/whl/cu124
+#   then run `pip install -r requirements.txt` (torch will already be satisfied).
+#
+# System (non-pip) tools used by the Slurm launch scripts: `jq` and the
+# cluster's Anaconda3 module — not installable via pip.
+
+# --- GP modeling & Bayesian optimization / acquisition (fixed stack) ---
+torch>=2.5
+gpytorch>=1.14
+botorch>=0.13
+
+# --- Numerics ---
+numpy>=1.24
+scipy>=1.10
+
+# --- Experiment configs (YAML files; CLI falls back to JSON if absent) ---
+pyyaml>=5.4
+
+# --- Reporting: PDF metric plots (itcas.reporting / itcas.visualize) ---
+matplotlib>=3.7
+
+# -------------------------------------------------------------------------
+# Pinned versions known to pass the smoke tests (for exact reproducibility):
+#   torch==2.12.0
+#   gpytorch==1.15.2
+#   botorch==0.16.1
+#   numpy==2.2.6
+#   pyyaml==5.4.1
+#   matplotlib==3.10.9
+# -------------------------------------------------------------------------

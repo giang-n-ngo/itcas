@@ -1,0 +1,15 @@
+# Smoke-test config for the contextual problem: exercises the joint
+# (objective + context) QD-DPP diversity kernel. Runs in seconds.
+problem: contextual_circles_3d
+method: itcas
+budget: 12
+batch_size: 3
+n_init: 8
+n_candidates: 128
+n_ts_samples: 1
+seed: 0
+target_X: 5
+radius: 0.15
+dpp_lambda_ctx: null
+out_dir: results/smoke_contextual
+run_name: itcas_contextual_smoke
