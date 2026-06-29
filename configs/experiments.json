@@ -58,10 +58,10 @@
     "spacecraft_formation_flying_a1": {
       "_comment": "Real Basilisk/Slurm simulation (D=16, 3 constraints). n_init draws from pre-filtered historical pool. Difficulty keys 1–4 select (rmse_m, fuel_g, thrust_n) constraint thresholds; pass --threshold_pct 1|2|3|4.",
       "defaults": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
-      "1": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
-      "2": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
-      "3": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
-      "4": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 }
+      "1": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 1.0 },
+      "2": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 1.0 },
+      "3": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 1.0 },
+      "4": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 1.0 }
     },
     "sphere2_6d": {
       "_comment": "Benchmark 1 - 2-obj shifted sphere (D=6, 2 obj). Convex baseline.",

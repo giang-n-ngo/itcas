@@ -567,16 +567,17 @@ def _plot_problem_curves(
             if c_idx == 0:
                 ax.set_ylabel(f"{diff}", fontsize=8)
 
-        # Product column (point-wise product across metrics by iteration)
+        # Product column — rank over time (rank of median product, 1 = best)
         ax = axes[r_idx][-1]
-        ax.grid(True, alpha=0.25)
+        ax.grid(True, axis="y", alpha=0.25)
         ax.tick_params(axis="both", labelsize=7)
-        plotted = False
 
+        # Pass 1: median product curve per method
+        method_med: dict[str, list[float]] = {}
+        x_ref_prod: Optional[list] = None
         for method in methods:
             seeded_runs = method_runs.get(method, [])
             prod_curves: list[list[float]] = []
-            x_ref = None
             for run in seeded_runs:
                 run_curves = curve_cache.get(run.run_name) or {}
                 prod = _compute_seed_product_curve(run, axis, run_curves, metrics_present)
@@ -585,24 +586,37 @@ def _plot_problem_curves(
                 xs = run.x_evals if axis == "evals" else run.x_steps
                 n = min(len(xs), len(prod))
                 prod_curves.append(prod[:n])
-                if x_ref is None:
-                    x_ref = list(xs[:n])
-            if not prod_curves or x_ref is None:
+                if x_ref_prod is None:
+                    x_ref_prod = list(xs[:n])
+            if not prod_curves:
                 continue
-            lo, med, hi = _min_med_max(prod_curves)
-            n = min(len(med), len(x_ref))
-            x_plot = x_ref[:n]
-            color = method_colors[method]
-            ax.plot(x_plot, med[:n], color=color, linewidth=1.5, label=method)
-            if len(prod_curves) > 1:
-                ax.fill_between(x_plot, lo[:n], hi[:n], color=color, alpha=0.15)
-            plotted = True
+            _, med, _ = _min_med_max(prod_curves)
+            method_med[method] = med
+
+        # Pass 2: rank methods at each time step (1 = highest product = best)
+        plotted = False
+        if method_med and x_ref_prod is not None:
+            n_t = min(min(len(v) for v in method_med.values()), len(x_ref_prod))
+            x_plot = x_ref_prod[:n_t]
+            ranked = sorted(method_med.keys())
+            for method in ranked:
+                med_t = method_med[method]
+                rank_curve = []
+                for t in range(n_t):
+                    vals = sorted(ranked, key=lambda m: -method_med[m][t])
+                    rank_curve.append(vals.index(method) + 1)
+                ax.plot(x_plot, rank_curve, color=method_colors[method],
+                        linewidth=1.5, label=method)
+                plotted = True
+            n_ranked = len(method_med)
+            ax.set_ylim(n_ranked + 0.5, 0.5)  # rank 1 at top
+            ax.set_yticks(list(range(1, n_ranked + 1)))
 
         if not plotted:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
                     transform=ax.transAxes, fontsize=8, color="grey")
         if r_idx == 0:
-            ax.set_title("Product\n(higher = better)", fontsize=8)
+            ax.set_title("Product rank\n(1 = best)", fontsize=8)
         if r_idx == n_rows - 1:
             ax.set_xlabel(axis_label, fontsize=8)
 

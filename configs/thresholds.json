@@ -2473,6 +2473,72 @@
         200.0,
         10.0
       ]
+    },
+    "5": {
+      "description": "",
+      "fuel_threshold_g": 200.0,
+      "peak_thrust_threshold_n": 10.0,
+      "rmse_threshold_m": 150.0,
+      "thresholds": [
+        150.0,
+        200.0,
+        10.0
+      ]
+    },
+    "6": {
+      "description": "",
+      "fuel_threshold_g": 150.0,
+      "peak_thrust_threshold_n": 10.0,
+      "rmse_threshold_m": 200.0,
+      "thresholds": [
+        200.0,
+        150.0,
+        10.0
+      ]
+    },
+    "7": {
+      "description": "",
+      "fuel_threshold_g": 200.0,
+      "peak_thrust_threshold_n": 5.0,
+      "rmse_threshold_m": 150.0,
+      "thresholds": [
+        150.0,
+        200.0,
+        5.0
+      ]
+    },
+    "8": {
+      "description": "",
+      "fuel_threshold_g": 150.0,
+      "peak_thrust_threshold_n": 5.0,
+      "rmse_threshold_m": 200.0,
+      "thresholds": [
+        200.0,
+        150.0,
+        5.0
+      ]
+    },
+    "9": {
+      "description": "",
+      "fuel_threshold_g": 150.0,
+      "peak_thrust_threshold_n": 5.0,
+      "rmse_threshold_m": 150.0,
+      "thresholds": [
+        150.0,
+        150.0,
+        5.0
+      ]
+    },
+    "10": {
+      "description": "",
+      "fuel_threshold_g": 100.0,
+      "peak_thrust_threshold_n": 10.0,
+      "rmse_threshold_m": 100.0,
+      "thresholds": [
+        100.0,
+        100.0,
+        10.0
+      ]
     }
   },
   "sphere2_6d": {
