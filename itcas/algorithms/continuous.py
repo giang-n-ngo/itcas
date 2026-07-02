@@ -43,6 +43,7 @@ Step 5 - **Continuous submodular maximization (QD-DPP).** The batch is built
 """
 from __future__ import annotations
 
+import math
 from typing import Callable, Optional, Sequence
 
 import torch
@@ -173,66 +174,179 @@ def _dedup(points: torch.Tensor, tol: float) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
+# Step 3 helpers: adaptive gamma + context-stratified pool
+# ---------------------------------------------------------------------------
+def _adaptive_gamma(
+    models,
+    bounds: torch.Tensor,
+    tau: torch.Tensor,
+    gamma_base: float,
+    gamma_cold: float,
+    n_pool: int = 64,
+    rng_seed=None,
+) -> float:
+    """Compute gamma_t: high during cold-start, decays logarithmically toward gamma_base.
+
+    Estimates the best predicted feasibility margin over a small random pool,
+    then sets:
+        gap     = max(0, -best_margin)
+        gamma_t = min(gamma_cold, gamma_base * (1 + log1p(gap / gamma_base)))
+
+    When the pool shows no feasible point (gap > 0) gamma_t > gamma_base,
+    providing gentler gradients that escape cold-start; as best_margin -> 0+
+    gamma_t -> gamma_base, sharpening the feasibility boundary.
+    """
+    pool = _uniform_starts(bounds, n_pool, rng_seed)
+    with torch.no_grad():
+        mu_pool, _ = posterior_mean_std(models, pool)
+    best_margin = float((mu_pool - tau).min(dim=-1).values.max())
+    gap = max(0.0, -best_margin)
+    gamma_t = gamma_base * (1.0 + math.log1p(gap / max(gamma_base, 1e-6)))
+    return min(gamma_t, gamma_cold)
+
+
+def _sobol_context_pool(
+    bounds: torch.Tensor,
+    context_dims,
+    n_contexts: int,
+    n_designs: int,
+    rng_seed,
+) -> torch.Tensor:
+    """Build a (n_contexts * n_designs, d) pool: Sobol-stratified contexts x random designs.
+
+    Context dimensions are filled with a scrambled Sobol sequence of n_contexts
+    points; each context is paired with n_designs independently-uniform design
+    points, yielding a total of n_contexts * n_designs rows.
+
+    If context_dims is empty the entire domain is filled with a plain Sobol
+    sequence (n_contexts * n_designs points over all d dimensions).
+    """
+    d = bounds.shape[1]
+    lo, hi = bounds[0], bounds[1]
+    ctx = list(context_dims) if context_dims else []
+    seed_val = int(rng_seed) % (2 ** 31) if rng_seed is not None else 0
+
+    if not ctx:
+        N = n_contexts * n_designs
+        sobol = torch.quasirandom.SobolEngine(d, scramble=True, seed=seed_val)
+        unit = sobol.draw(N).to(device=bounds.device, dtype=bounds.dtype)
+        return lo + (hi - lo) * unit
+
+    des = [i for i in range(d) if i not in ctx]
+    N = n_contexts * n_designs
+    z = torch.empty(N, d, device=bounds.device, dtype=bounds.dtype)
+
+    # Sobol sequence over context dims only (Step 1: context stratification).
+    sobol_ctx = torch.quasirandom.SobolEngine(len(ctx), scramble=True, seed=seed_val)
+    ctx_unit = sobol_ctx.draw(n_contexts).to(device=bounds.device, dtype=bounds.dtype)
+    ctx_pts = lo[ctx] + (hi[ctx] - lo[ctx]) * ctx_unit  # (k, d_c)
+    z[:, ctx] = ctx_pts.repeat_interleave(n_designs, dim=0)
+
+    if des:
+        g = (
+            torch.Generator(device=bounds.device).manual_seed(seed_val)
+            if rng_seed is not None
+            else None
+        )
+        des_unit = torch.rand(N, len(des), device=bounds.device, dtype=bounds.dtype, generator=g)
+        z[:, des] = lo[des] + (hi[des] - lo[des]) * des_unit
+
+    return z
+
+
+# ---------------------------------------------------------------------------
 # Step 3: reference-set construction
 # ---------------------------------------------------------------------------
 def build_reference_set(
-    models: Sequence[SingleTaskGP],
+    models,
     bounds: torch.Tensor,
     tau: torch.Tensor,
     *,
     gamma: float = 0.1,
-    n_restarts: int = 16,
-    n_steps: int = 60,
-    lr: float = 0.05,
+    gamma_cold: float = 2.0,
+    n_restarts: int = 16,       # reinterpreted as n_context_anchors (Sobol contexts)
+    n_steps: int = 64,          # reinterpreted as n_designs_per_context
+    lr: float = 0.05,           # kept for API compat, unused by volume sampling
     n_ts_samples: int = 1,
+    temp: float = 1.0,          # softmax temperature T for proportional sampling
+    n_ref: int = 16,            # max Z_ref size in feasible phase
     cold_start_k: int = 4,
     dedup_tol: float = 1e-3,
     rng_seed: Optional[int] = None,
+    context_dims=(),
 ) -> tuple[torch.Tensor, dict]:
-    """Construct the continuous reference set ``Z_ref`` (Steps 1-3).
+    """Steps 1-3 of ROI-MI: context-stratified TS, adaptive gamma, volume sampling.
 
-    For each of ``n_ts_samples`` RFF posterior draws we run multi-start gradient
-    ascent of the smooth margin and collect the reference points per the
-    dynamic feasible / cold-start rule, then take the union across draws.
+    Replaces gradient-ascent-based local-maxima construction with a three-stage
+    pipeline faithful to the revised ``methodology.tex`` spec:
 
-    Returns ``(Z_ref, info)``. ``Z_ref`` has shape ``(R, d)`` (always non-empty
-    as long as the optimizer produces at least one finite point).
+    Step 1 (context-stratified pool): ``n_restarts`` Sobol context points cross
+        ``n_steps`` random designs yield a pool of ``n_restarts * n_steps`` pairs.
+        ``n_restarts`` is *reinterpreted* as the number of Sobol context anchors
+        and ``n_steps`` as the number of random design points paired to each anchor.
+
+    Step 2 (adaptive gamma): ``gamma_t`` is computed once per round from a
+        small GP posterior pool. During cold-start (all predictions infeasible)
+        gamma_t is high (up to ``gamma_cold``), providing gentle gradients; it
+        logarithmically decays toward ``gamma`` (``gamma_base``) as the best
+        predicted margin approaches zero.
+
+    Step 3 (volume sampling): Points with M > 0 are sampled proportionally to
+        ``exp(M / temp)`` (softmax-weighted multinomial) capped at ``n_ref``
+        to cover the feasible volume broadly. In cold-start (no M > 0) the
+        ``cold_start_k`` points closest to feasibility are used instead.
     """
+    # Step 2: adaptive gamma_t — computed once per round from the GP posterior.
+    gamma_t = _adaptive_gamma(
+        models, bounds, tau, gamma, gamma_cold, rng_seed=rng_seed
+    )
+
     refs: list[torch.Tensor] = []
     n_feasible_samples = 0
+
     for s in range(max(n_ts_samples, 1)):
         seed_s = None if rng_seed is None else rng_seed + s
+
+        # Step 1: context-stratified Sobol pool.
+        z_pool = _sobol_context_pool(bounds, context_dims, n_restarts, n_steps, seed_s)
+
         if seed_s is not None:
             torch.manual_seed(seed_s)
         paths = draw_objective_paths(models, n_samples=1)
 
-        def margin_obj(z: torch.Tensor) -> torch.Tensor:
-            f = evaluate_paths(paths, z).squeeze(0)  # (N, m)
-            return smooth_margin(f, tau, gamma)
+        # Step 2: evaluate the adaptive smooth margin on the hallucinated path.
+        with torch.no_grad():
+            f_sample = evaluate_paths(paths, z_pool).squeeze(0)  # (N, m)
+        M = smooth_margin(f_sample, tau, gamma_t)                 # (N,)
 
-        Z_opt, M_opt = multistart_ascent(
-            margin_obj, bounds, n_restarts, n_steps, lr=lr, seed=seed_s
-        )
-        finite = torch.isfinite(M_opt)
-        Z_opt, M_opt = Z_opt[finite], M_opt[finite]
-        if Z_opt.numel() == 0:
+        finite = torch.isfinite(M)
+        if not bool(finite.any()):
             continue
+        z_pool, M = z_pool[finite], M[finite]
 
-        max_m = float(M_opt.max())
+        # Step 3: volume-based Z_ref construction.
+        max_m = float(M.max())
         if max_m > 0.0:
-            # Feasible interior exists: keep strictly-feasible peaks.
+            # Feasible interior exists: sample proportionally to exp(M / T).
             n_feasible_samples += 1
-            sel = Z_opt[M_opt > 0.0]
+            feas = M > 0.0
+            z_feas, M_feas = z_pool[feas], M[feas]
+            weights = torch.softmax(M_feas / temp, dim=0)
+            n_draw = min(n_ref, z_feas.shape[0])
+            replace = n_draw > z_feas.shape[0]
+            idx = torch.multinomial(weights, n_draw, replacement=replace)
+            sel = z_feas[idx]
         else:
-            # Cold start: target the closest peaks to feasibility (top-k by M).
-            k = min(cold_start_k, Z_opt.shape[0])
-            top = torch.topk(M_opt, k).indices
-            sel = Z_opt[top]
+            # Cold-start: pick the k points closest to feasibility (top-k by M).
+            k = min(cold_start_k, z_pool.shape[0])
+            top = torch.topk(M, k).indices
+            sel = z_pool[top]
+
         refs.append(_dedup(sel, dedup_tol))
 
     if not refs:
-        # Degenerate optimizer output: fall back to a single random anchor so
-        # the downstream ROI-MI / DPP always has a reference point to work with.
+        # Degenerate: fall back to a single random anchor so downstream
+        # ROI-MI / DPP always has at least one reference point.
         Z_ref = _uniform_starts(bounds, 1, rng_seed)
     else:
         Z_ref = _dedup(torch.cat(refs, dim=0), dedup_tol)
@@ -241,6 +355,7 @@ def build_reference_set(
         "ref_set_size": int(Z_ref.shape[0]),
         "n_feasible_samples": n_feasible_samples,
         "cold_start": n_feasible_samples == 0,
+        "gamma_t": float(gamma_t),
     }
     return Z_ref, info
 

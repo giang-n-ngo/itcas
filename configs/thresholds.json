@@ -1360,7 +1360,7 @@
   "ellipsoid_rastrigin_20d": {
     "0.01": {
       "achieved_fraction": 0.010005,
-      "created": "2026-06-29T14:41:16",
+      "created": "2026-07-02T03:14:54",
       "margin_below_max": [
         11749.41932297769,
         155.0546551027202
@@ -1386,7 +1386,7 @@
     },
     "0.05": {
       "achieved_fraction": 0.050005,
-      "created": "2026-06-29T14:41:14",
+      "created": "2026-07-02T03:14:52",
       "margin_below_max": [
         16452.85594281967,
         191.60189715940456
@@ -1412,7 +1412,7 @@
     },
     "0.1": {
       "achieved_fraction": 0.1,
-      "created": "2026-06-29T14:41:12",
+      "created": "2026-07-02T03:14:50",
       "margin_below_max": [
         19417.468089599446,
         211.84900962204753
@@ -1434,6 +1434,32 @@
       "thresholds": [
         -21077.002100822912,
         -405.77482269481146
+      ]
+    },
+    "0.2": {
+      "achieved_fraction": 0.2,
+      "created": "2026-07-02T03:14:48",
+      "margin_below_max": [
+        23383.03737688309,
+        237.5327437116524
+      ],
+      "maxima": [
+        -1659.5340112234671,
+        -193.92581307276393
+      ],
+      "method": "equal-marginal-quantile-bisection",
+      "minima": [
+        -73154.12906168448,
+        -785.6493517506647
+      ],
+      "n_samples": 200000,
+      "problem": "ellipsoid_rastrigin_20d",
+      "quantile_level": 0.5962329811649059,
+      "seed": 0,
+      "target_fraction": 0.2,
+      "thresholds": [
+        -25042.571388106557,
+        -431.4585567844163
       ]
     }
   },
@@ -1578,7 +1604,7 @@
   "griewank_vlmop2_16d": {
     "0.01": {
       "achieved_fraction": 0.010005,
-      "created": "2026-06-29T14:42:37",
+      "created": "2026-06-30T17:04:46",
       "margin_below_max": [
         0.15668219714574172,
         5.2022830487885585e-12,
@@ -1608,7 +1634,7 @@
     },
     "0.05": {
       "achieved_fraction": 0.050005,
-      "created": "2026-06-29T14:42:33",
+      "created": "2026-06-30T17:04:44",
       "margin_below_max": [
         0.16383152874363116,
         5.2022830487885585e-12,
@@ -1638,7 +1664,7 @@
     },
     "0.1": {
       "achieved_fraction": 0.1,
-      "created": "2026-06-29T14:42:25",
+      "created": "2026-06-30T17:04:41",
       "margin_below_max": [
         0.16661550663108438,
         5.2022830487885585e-12,
@@ -1668,7 +1694,7 @@
     },
     "0.2": {
       "achieved_fraction": 0.200005,
-      "created": "2026-06-29T14:42:14",
+      "created": "2026-06-30T17:04:39",
       "margin_below_max": [
         0.1698121371638226,
         5.2022830487885585e-12,
@@ -2441,6 +2467,17 @@
         2.0
       ]
     },
+    "10": {
+      "description": "",
+      "fuel_threshold_g": 100.0,
+      "peak_thrust_threshold_n": 10.0,
+      "rmse_threshold_m": 100.0,
+      "thresholds": [
+        100.0,
+        100.0,
+        10.0
+      ]
+    },
     "2": {
       "description": "Moderate: RMSE \u2264 100 m, fuel \u2264 100 g, thrust \u2264 5 N",
       "fuel_threshold_g": 100.0,
@@ -2527,17 +2564,6 @@
         150.0,
         150.0,
         5.0
-      ]
-    },
-    "10": {
-      "description": "",
-      "fuel_threshold_g": 100.0,
-      "peak_thrust_threshold_n": 10.0,
-      "rmse_threshold_m": 100.0,
-      "thresholds": [
-        100.0,
-        100.0,
-        10.0
       ]
     }
   },

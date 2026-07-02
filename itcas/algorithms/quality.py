@@ -340,12 +340,14 @@ def _build_roi_mi(
     opt_lr: float = 0.05,
     n_ts_samples: int = 1,
     rng_seed: Optional[int] = None,
+    context_dims=(),     # previously silently discarded; now forwarded to build_reference_set
     **_: object,
 ) -> tuple[QualityFn, dict]:
     """ROI-MI provider: build the continuous reference set, then score against it.
 
     Imported lazily to avoid a circular import with ``continuous`` (which imports
-    this registry).
+    this registry).  ``context_dims`` is forwarded so ``build_reference_set`` can
+    stratify the Sobol pool over the context sub-space (Step 1 of the spec).
     """
     from .continuous import build_reference_set, roi_mi_quality_continuous
 
@@ -359,6 +361,7 @@ def _build_roi_mi(
         lr=opt_lr,
         n_ts_samples=n_ts_samples,
         rng_seed=rng_seed,
+        context_dims=context_dims,
     )
 
     def q(z: torch.Tensor) -> torch.Tensor:

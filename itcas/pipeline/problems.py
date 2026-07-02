@@ -1537,11 +1537,11 @@ class SpacecraftFormationFlyingA1(Problem):
         X_np = X.detach().cpu().double().numpy()
         N = int(X_np.shape[0])
 
-        slurm_script = self._smartsat_root / "formation_flying_slurm.sh"
+        slurm_script = self._smartsat_root / "ff_sim_batch.sbatch"
         if not slurm_script.exists():
             raise FileNotFoundError(
                 f"Slurm script not found: {slurm_script}. "
-                "Expected at SmartSat/formation_flying_slurm.sh"
+                "Expected at SmartSat/ff_sim_batch.sbatch"
             )
 
         # Use a shared-filesystem path so compute nodes can read/write the
@@ -1580,11 +1580,11 @@ class SpacecraftFormationFlyingA1(Problem):
             # CONDA_ENV=itcas from the parent sweep, so the launcher activates
             # the wrong env (no ``control``) and every task fails its preflight
             # import, producing penalty constraints for all points.
-            log_pat = str(job_dir / "slurm_%A_%a.log")
+            log_pat = str(job_dir / "slurm_%j.log")
             sbatch_cmd = [
                 "sbatch",
                 "--parsable",
-                f"--array=0-{N - 1}",
+                f"--cpus-per-task={N}",
                 f"--output={log_pat}",
                 f"--error={log_pat}",
                 f"--export=ALL,CONDA_ENV={self._sim_conda_env}",
@@ -1672,21 +1672,12 @@ class SpacecraftFormationFlyingA1(Problem):
 
         finally:
             if not all_ok and job_id:
-                # Preserve logs so the user can diagnose task failures.
-                diag_dir = self._smartsat_root / "ff_sim_logs" / job_id
-                try:
-                    diag_dir.mkdir(parents=True, exist_ok=True)
-                    for log in job_dir.glob("slurm_*.log"):
-                        shutil.copy(log, diag_dir / log.name)
-                    import warnings as _warnings
-                    _warnings.warn(
-                        f"[ff_sim] {N - n_results}/{N} tasks produced no result. "
-                        f"Slurm logs saved to {diag_dir}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                except Exception:
-                    pass
+                import warnings as _warnings
+                _warnings.warn(
+                    f"[ff_sim] {N - n_results}/{N} tasks produced no result.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             shutil.rmtree(job_dir, ignore_errors=True)
 
         return torch.tensor(Y_rows, dtype=X.dtype)
