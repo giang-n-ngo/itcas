@@ -15,6 +15,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import tempfile
 import time
 from typing import Any, Optional
 
@@ -75,8 +76,31 @@ class RunLogger:
             os.close(fd)
 
     def finalize(self, summary: dict) -> None:
-        with open(self.summary_path, "w") as f:
-            json.dump(_to_jsonable(summary), f, indent=2)
+        # Serialise fully in memory first, then write atomically: a plain
+        # open(path, "w") + json.dump truncates in place and streams multiple
+        # writes, so two overlapping ``finalize`` calls on the same path
+        # (e.g. a retry that overlaps with the previous attempt) can
+        # interleave and leave a truncated-then-appended file behind. Writing
+        # to a temp file in the same directory and ``os.replace``-ing it into
+        # place makes the update atomic: any concurrent writer either wins
+        # outright or loses outright, but the result is always one complete,
+        # valid JSON document.
+        payload = json.dumps(_to_jsonable(summary), indent=2)
+        fd, tmp_path = tempfile.mkstemp(
+            dir=self.out_dir, prefix=f".{self.run_name}.summary.", suffix=".json.tmp"
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.summary_path)
+        except BaseException:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def close(self) -> None:
         # Kept for API compatibility; the per-write open/close model means

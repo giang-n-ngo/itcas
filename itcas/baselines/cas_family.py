@@ -10,7 +10,7 @@ References: contexts/cas.md, contexts/moccas.md.
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 from botorch.models import SingleTaskGP
@@ -21,6 +21,7 @@ from ..algorithms.roi_mi import (
     joint_feasibility_probability,
 )
 from ..utils.gp import posterior_mean_std
+from .batch_dpp import score_to_dpp_batch
 
 
 def _uniform_in_ball(n: int, dim: int, radius: float, generator) -> torch.Tensor:
@@ -78,6 +79,33 @@ def cas_eci(
     return idx, {"baseline": "cas_eci", "score": score.detach().cpu()}
 
 
+def cas_eci_batch(
+    models: list[SingleTaskGP],
+    cand: torch.Tensor,
+    h: torch.Tensor,
+    batch_size: int = 1,
+    X_obs: Optional[torch.Tensor] = None,
+    radius: float = 0.1,
+    n_mc: int = 64,
+    rng_seed: Optional[int] = None,
+    context_dims: Optional[Sequence[int]] = None,
+    dpp_lambda: Optional[float] = None,
+    dpp_lambda_ctx: Optional[float] = None,
+    **kwargs,
+):
+    """ECI + DPP: full-pool ECI score fed into the QD-DPP L-ensemble."""
+    _, info = cas_eci(
+        models, cand, h, batch_size=cand.shape[0], X_obs=X_obs, radius=radius,
+        n_mc=n_mc, rng_seed=rng_seed,
+    )
+    score = info["score"].to(cand)
+    idx = score_to_dpp_batch(
+        models, cand, score, batch_size,
+        context_dims=context_dims, dpp_lambda=dpp_lambda, dpp_lambda_ctx=dpp_lambda_ctx,
+    )
+    return idx, {"baseline": "cas_eci_batch", "score": score.detach().cpu()}
+
+
 def moc_cas_hard(
     models: list[SingleTaskGP],
     cand: torch.Tensor,
@@ -123,6 +151,34 @@ def moc_cas_hard(
     return idx, {"baseline": "moc_cas_hard", "score": score.detach().cpu()}
 
 
+def moc_cas_hard_batch(
+    models: list[SingleTaskGP],
+    cand: torch.Tensor,
+    h: torch.Tensor,
+    batch_size: int = 1,
+    Y_obs: Optional[torch.Tensor] = None,
+    radius: float = 0.1,
+    beta: float = 2.0,
+    n_mc: int = 64,
+    rng_seed: Optional[int] = None,
+    context_dims: Optional[Sequence[int]] = None,
+    dpp_lambda: Optional[float] = None,
+    dpp_lambda_ctx: Optional[float] = None,
+    **kwargs,
+):
+    """MOC-CAS (hard) + DPP: full-pool hard-geometric score fed into the QD-DPP L-ensemble."""
+    _, info = moc_cas_hard(
+        models, cand, h, batch_size=cand.shape[0], Y_obs=Y_obs, radius=radius,
+        beta=beta, n_mc=n_mc, rng_seed=rng_seed,
+    )
+    score = info["score"].to(cand)
+    idx = score_to_dpp_batch(
+        models, cand, score, batch_size,
+        context_dims=context_dims, dpp_lambda=dpp_lambda, dpp_lambda_ctx=dpp_lambda_ctx,
+    )
+    return idx, {"baseline": "moc_cas_hard_batch", "score": score.detach().cpu()}
+
+
 def moc_cas_soft(
     models: list[SingleTaskGP],
     cand: torch.Tensor,
@@ -164,6 +220,8 @@ def moc_cas_soft(
 
 REGISTRY = {
     "cas_eci": cas_eci,
+    "cas_eci_batch": cas_eci_batch,
     "moc_cas_hard": moc_cas_hard,
+    "moc_cas_hard_batch": moc_cas_hard_batch,
     "moc_cas_soft": moc_cas_soft,
 }

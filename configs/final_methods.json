@@ -1,0 +1,38 @@
+{
+    "families": {
+        "itcas": ["itcas/ndig"],
+        "itcas_seq": ["itcas_seq/ndig"],
+        "cr_ndig": ["cr_ndig"],
+        "bes": ["bes", "bes_batch", "bes_then_sample_lse50", "bes_then_sample_lse50_batch"],
+        "straddle": ["straddle", "straddle_batch", "straddle_then_sample_lse50", "straddle_then_sample_lse50_batch"],
+        "random": ["random", "random_batch"],
+        "eci": ["cas_eci", "cas_eci_batch"],
+        "moc_cas_hard": ["moc_cas_hard", "moc_cas_hard_batch"]
+    },
+    "methods": [
+        "itcas/ndig",
+        "itcas_seq/ndig",
+        "cr_ndig",
+        "bes",
+        "bes_batch",
+        "bes_then_sample_lse10",
+        "bes_then_sample_lse10_batch",
+        "bes_then_sample_lse25",
+        "bes_then_sample_lse25_batch",
+        "bes_then_sample_lse50",
+        "bes_then_sample_lse50_batch",
+        "straddle",
+        "straddle_batch",
+        "straddle_then_sample_lse10",
+        "straddle_then_sample_lse10_batch",
+        "straddle_then_sample_lse25",
+        "straddle_then_sample_lse25_batch",
+        "straddle_then_sample_lse50",
+        "straddle_then_sample_lse50_batch",
+        "random",
+        "cas_eci",
+        "cas_eci_batch",
+        "moc_cas_hard",
+        "moc_cas_hard_batch"
+    ]
+}

@@ -496,6 +496,8 @@ def select_batch_continuous(
     dpp_lambda: Optional[float] = None,
     dpp_lambda_ctx: Optional[float] = None,
     rng_seed: Optional[int] = None,
+    t: int = 0,
+    X_obs: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, dict]:
     """Run the full continuous C-MO-CAS acquisition and return the batch.
 
@@ -504,6 +506,14 @@ def select_batch_continuous(
             in ``quality.QUALITY_REGISTRY`` (e.g. ``"roi_mi"`` or ``"lf_mi"``).
             The DPP diversity machinery is identical across variants; only the
             ``q(z)`` term changes.
+        t: 0-based pipeline iteration index, forwarded to ``build_quality_fn``.
+            Only consumed by the Family-B round-robin variants (``c2lse``,
+            ``bes``), which use it to select ``active_obj = t % m``; every
+            other variant ignores it.
+        X_obs: full accumulated observed dataset ``D_{t-1}`` (design + context
+            coordinates), forwarded to ``build_quality_fn``. Only consumed by
+            ``cr_ndig`` (context-repulsion against acquisition history); every
+            other variant ignores it.
 
     Returns ``(X_new, info)`` where ``X_new`` is a ``(b, d)`` tensor of
     selected design-context points ``z = (x, c)`` in the original domain.
@@ -512,7 +522,7 @@ def select_batch_continuous(
         quality, models, bounds, tau,
         context_dims=context_dims, gamma=gamma, n_restarts=n_restarts,
         n_opt_steps=n_opt_steps, opt_lr=opt_lr, n_ts_samples=n_ts_samples,
-        rng_seed=rng_seed,
+        rng_seed=rng_seed, t=t, X_obs=X_obs,
     )
 
     # Length-scales for the diversity kernels (median heuristic over a domain

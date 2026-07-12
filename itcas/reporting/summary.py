@@ -26,9 +26,11 @@ Each PDF contains one subplot row per difficulty (e.g. ``p0_05``,
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import re
 from pathlib import Path
+from statistics import median
 from typing import Iterable, Optional
 
 import torch
@@ -198,6 +200,150 @@ def _compute_seed_product_curve(
             p *= v if higher_is_better else 1.0 / max(abs(v), _EPS_FLOOR)
         out.append(p)
     return out
+
+
+def _min_med_max(
+    curves: list[list[float]],
+) -> tuple[list[float], list[float], list[float]]:
+    """Elementwise min/median/max across curves from the same method's seeds.
+
+    Truncating to the shortest curve here is safe because all ``curves``
+    passed in share one method's own ``x_evals``/``x_steps`` (its seeds all
+    log on the same iteration schedule) -- unlike the cross-method product/
+    rank columns, which must never share this kind of positional truncation
+    across *different* methods (see ``_per_method_product_curves`` and
+    ``_rank_curves_on_union_grid`` below).
+    """
+    n = min(len(c) for c in curves)
+    trimmed = [c[:n] for c in curves]
+    lo, med, hi = [], [], []
+    for col in zip(*trimmed):
+        finite = [v for v in col if v == v]
+        if not finite:
+            lo.append(float("nan"))
+            med.append(float("nan"))
+            hi.append(float("nan"))
+        else:
+            lo.append(min(finite))
+            med.append(median(finite))
+            hi.append(max(finite))
+    return lo, med, hi
+
+
+def _per_method_product_curves(
+    method_runs: dict[str, list["RunSeries"]],
+    methods: Iterable[str],
+    axis: str,
+    cache: "CurveCache",
+    metrics_present: list[MetricSpec],
+) -> tuple[
+    dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], dict[str, list[float]],
+]:
+    """Per-method product curve, each against its OWN x-values.
+
+    Mirrors how the metric columns capture a fresh ``x_ref`` per method (see
+    the per-method loop in the metric-column code) instead of sharing one
+    ``x_ref``/one truncation length across every method. This matters because
+    a batch method (q>1) logs one record per algorithmic *step* while a
+    sequential method logs one per individual *evaluation*, so their curve
+    arrays can have very different lengths even when both span the same
+    total-evaluations range -- positionally truncating to the shortest array
+    (as the old shared-``x_ref_prod`` code did) silently mislabels a sparse
+    method's full-range curve onto a dense method's short early-range x-axis.
+
+    Returns ``(method_x, method_med, method_lo, method_hi)``, each keyed by
+    method name and holding only that method's own x-values and min/median/
+    max product curve (combined across its own seeds via ``_min_med_max``,
+    which is safe since seeds of the same method do share an iteration
+    schedule).
+    """
+    method_x: dict[str, list[float]] = {}
+    method_med: dict[str, list[float]] = {}
+    method_lo: dict[str, list[float]] = {}
+    method_hi: dict[str, list[float]] = {}
+    for method in methods:
+        seeded_runs = method_runs.get(method, [])
+        prod_curves: list[list[float]] = []
+        x_ref: Optional[list] = None
+        for run in seeded_runs:
+            run_curves = cache.get(run.run_name) or {}
+            prod = _compute_seed_product_curve(run, axis, run_curves, metrics_present)
+            if prod is None:
+                continue
+            xs = run.x_evals if axis == "evals" else run.x_steps
+            n = min(len(xs), len(prod))
+            prod_curves.append(prod[:n])
+            if x_ref is None:
+                x_ref = list(xs[:n])
+        if not prod_curves or x_ref is None:
+            continue
+        lo, med, hi = _min_med_max(prod_curves)
+        n = min(len(med), len(x_ref))
+        method_x[method] = [float(v) for v in x_ref[:n]]
+        method_med[method] = med[:n]
+        method_lo[method] = lo[:n]
+        method_hi[method] = hi[:n]
+    return method_x, method_med, method_lo, method_hi
+
+
+def _forward_fill_at(xs: list[float], ys: list[float], t: float) -> float:
+    """Step-function (last-known-value) lookup of ``ys`` at ``t``.
+
+    Returns the value ``ys[i]`` for the largest ``xs[i] <= t``, i.e. carries
+    forward a method's most recently logged value, since a method's curve is
+    only known (piecewise-constant) at its own logged checkpoints. Returns
+    NaN if ``xs`` is empty or ``t`` is before ``xs[0]`` (no data logged yet).
+    """
+    if not xs:
+        return float("nan")
+    idx = bisect.bisect_right(xs, t) - 1
+    if idx < 0:
+        return float("nan")
+    return ys[idx]
+
+
+def _rank_curves_on_union_grid(
+    method_x: dict[str, list[float]],
+    method_med: dict[str, list[float]],
+) -> tuple[list[float], dict[str, list[float]]]:
+    """Cross-method rank of the median product curve, aligned via forward-fill.
+
+    Methods with different numbers of logged points (e.g. a batch method with
+    ``q=5`` logs one record per algorithmic *step* while a sequential method
+    logs one per individual *evaluation*) cannot be compared by positional
+    index, nor by truncating every method to the shortest array length (that
+    silently mislabels a sparse-but-full-range method's curve onto a dense
+    method's short early-range x-axis). Instead:
+
+    1. The shared x-grid is the sorted union of every method's own x-values
+       actually present for this row -- no evaluation counts are invented.
+    2. Each method's product curve is treated as piecewise-constant between
+       its own logged checkpoints, so its value at any grid point is
+       forward-filled (last-known-value, see ``_forward_fill_at``) from its
+       most recent checkpoint at or before that point; NaN before a method's
+       first checkpoint (no data yet).
+    3. Rank at each grid point is computed only over the methods that have a
+       (non-NaN) value there, so a method with a smaller max budget simply
+       stops contributing to the rank once its own run ends instead of
+       distorting the comparison for the methods that keep going.
+
+    Returns ``(grid, rank_curves)`` where ``rank_curves[method]`` holds one
+    rank (1 = best, i.e. largest product value) per grid point, or NaN at
+    grid points where that method has no forward-filled value.
+    """
+    grid = sorted({x for xs in method_x.values() for x in xs})
+    rank_curves: dict[str, list[float]] = {m: [] for m in method_x}
+    for t in grid:
+        values: dict[str, float] = {}
+        for method, xs in method_x.items():
+            v = _forward_fill_at(xs, method_med[method], t)
+            if v == v:  # not NaN
+                values[method] = v
+        ranked = sorted(values, key=lambda m: -values[m])
+        rank_lookup = {m: i + 1 for i, m in enumerate(ranked)}
+        for method in method_x:
+            rank_curves[method].append(rank_lookup.get(method, float("nan")))
+    return grid, rank_curves
 
 
 def _precompute(runs: list[RunSeries]) -> CurveCache:
@@ -459,8 +605,6 @@ def _plot_problem_curves(
     (1/FCFD for lower-is-better), so it grows whenever any metric improves — higher is
     always better. The last column ranks methods by that product at each step (1 = best).
     """
-    from statistics import median
-
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -504,24 +648,6 @@ def _plot_problem_curves(
 
     axis_label = "Total individual evaluations" if axis == "evals" else "Algorithmic step"
     fig.suptitle(f"{problem}: metric curves vs {axis_label.lower()}", fontsize=11)
-
-    def _min_med_max(
-        curves: list[list[float]],
-    ) -> tuple[list[float], list[float], list[float]]:
-        n = min(len(c) for c in curves)
-        trimmed = [c[:n] for c in curves]
-        lo, med, hi = [], [], []
-        for col in zip(*trimmed):
-            finite = [v for v in col if v == v]
-            if not finite:
-                lo.append(float("nan"))
-                med.append(float("nan"))
-                hi.append(float("nan"))
-            else:
-                lo.append(min(finite))
-                med.append(median(finite))
-                hi.append(max(finite))
-        return lo, med, hi
 
     for r_idx, diff in enumerate(difficulties):
         method_runs = by_diff_method.get(diff, {})
@@ -567,47 +693,28 @@ def _plot_problem_curves(
             if c_idx == 0:
                 ax.set_ylabel(f"{diff}", fontsize=8)
 
-        # Pre-compute product curves once; shared by the raw-value and rank columns.
-        method_med: dict[str, list[float]] = {}
-        method_lo: dict[str, list[float]] = {}
-        method_hi: dict[str, list[float]] = {}
-        x_ref_prod: Optional[list] = None
-        for method in methods:
-            seeded_runs = method_runs.get(method, [])
-            prod_curves: list[list[float]] = []
-            for run in seeded_runs:
-                run_curves = curve_cache.get(run.run_name) or {}
-                prod = _compute_seed_product_curve(run, axis, run_curves, metrics_present)
-                if prod is None:
-                    continue
-                xs = run.x_evals if axis == "evals" else run.x_steps
-                n = min(len(xs), len(prod))
-                prod_curves.append(prod[:n])
-                if x_ref_prod is None:
-                    x_ref_prod = list(xs[:n])
-            if not prod_curves:
-                continue
-            lo, med, hi = _min_med_max(prod_curves)
-            method_med[method] = med
-            method_lo[method] = lo
-            method_hi[method] = hi
+        # Pre-compute each method's own product curve (own x-values -- see
+        # _per_method_product_curves; no cross-method truncation/alignment).
+        method_x, method_med, method_lo, method_hi = _per_method_product_curves(
+            method_runs, methods, axis, curve_cache, metrics_present,
+        )
 
-        # Raw product column (col N+1) — actual product values, higher is better.
+        # Raw product column (col N+1) — each method plotted against its OWN
+        # x-values, exactly like the metric columns above; this column needs
+        # no cross-method alignment since it's N independent lines.
         ax = axes[r_idx][-2]
         ax.grid(True, alpha=0.25)
         ax.tick_params(axis="both", labelsize=7)
         plotted = False
-        if method_med and x_ref_prod is not None:
-            n_t = min(min(len(v) for v in method_med.values()), len(x_ref_prod))
-            x_plot = x_ref_prod[:n_t]
-            for method in sorted(method_med.keys()):
-                color = method_colors[method]
-                ax.plot(x_plot, method_med[method][:n_t], color=color,
-                        linewidth=1.5, label=method)
-                if len(method_runs.get(method, [])) > 1:
-                    ax.fill_between(x_plot, method_lo[method][:n_t],
-                                    method_hi[method][:n_t], color=color, alpha=0.15)
-                plotted = True
+        for method in sorted(method_med.keys()):
+            color = method_colors[method]
+            x_plot = method_x[method]
+            ax.plot(x_plot, method_med[method], color=color,
+                    linewidth=1.5, label=method)
+            if len(method_runs.get(method, [])) > 1:
+                ax.fill_between(x_plot, method_lo[method], method_hi[method],
+                                color=color, alpha=0.15)
+            plotted = True
         if not plotted:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
                     transform=ax.transAxes, fontsize=8, color="grey")
@@ -616,21 +723,17 @@ def _plot_problem_curves(
         if r_idx == n_rows - 1:
             ax.set_xlabel(axis_label, fontsize=8)
 
-        # Rank column (col N+2) — rank of median product at each step (1 = best).
+        # Rank column (col N+2) — rank of the median product at each step
+        # (1 = best), aligned across methods on the union-of-x-values grid
+        # via forward-fill (see _rank_curves_on_union_grid).
         ax = axes[r_idx][-1]
         ax.grid(True, axis="y", alpha=0.25)
         ax.tick_params(axis="both", labelsize=7)
         plotted = False
-        if method_med and x_ref_prod is not None:
-            n_t = min(min(len(v) for v in method_med.values()), len(x_ref_prod))
-            x_plot = x_ref_prod[:n_t]
-            ranked = sorted(method_med.keys())
-            for method in ranked:
-                rank_curve = []
-                for t in range(n_t):
-                    vals = sorted(ranked, key=lambda m: -method_med[m][t])
-                    rank_curve.append(vals.index(method) + 1)
-                ax.plot(x_plot, rank_curve, color=method_colors[method],
+        if method_med:
+            grid, rank_curves = _rank_curves_on_union_grid(method_x, method_med)
+            for method in sorted(method_med.keys()):
+                ax.plot(grid, rank_curves[method], color=method_colors[method],
                         linewidth=1.5, label=method)
                 plotted = True
             n_ranked = len(method_med)

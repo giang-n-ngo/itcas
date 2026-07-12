@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-(problem, difficulty) experiment sizing for the ITCAS sweep. budget/batch_size/n_init scale with the problem (dimension, #objectives) and the difficulty (joint-feasible fraction), so they live here instead of in scripts/jobs.json (which only selects the sweep matrix: method x problem x difficulty x seeds). Resolution order for each field: problems[<problem>][<difficulty>] -> problems[<problem>].defaults -> top-level defaults. The <difficulty> key is the threshold_pct string (e.g. \"0.05\"); for uncalibrated/default-threshold runs the key is \"defaults\". eps_archive is the ε-Archive Size distance threshold in normalised objective space (0.05 = 5% of the normalised range). Owned jointly: the Slurm Operator wires it into the launcher; the Scientific Coder tunes the numbers.",
+  "_comment": "Per-(problem, difficulty) experiment sizing for the ITCAS sweep. budget/batch_size/n_init scale with the problem (dimension, #objectives) and the difficulty (joint-feasible fraction), so they live here instead of in scripts/jobs.json (which only selects the sweep matrix: method x problem x difficulty x seeds). Resolution order for each field: problems[<problem>][<difficulty>] -> problems[<problem>].defaults -> top-level defaults. The <difficulty> key is the threshold_pct string (e.g. \"0.05\"); for uncalibrated/default-threshold runs the key is \"defaults\". eps_archive is the \u03b5-Archive Size distance threshold in normalised objective space (0.05 = 5% of the normalised range). Owned jointly: the Slurm Operator wires it into the launcher; the Scientific Coder tunes the numbers.",
   "defaults": {
     "budget": 50,
     "batch_size": 4,
@@ -9,123 +9,624 @@
   "problems": {
     "ackley_rosenbrock_6d": {
       "_comment": "Benchmark 17 - Ackley vs. Rosenbrock (D=6, 2 obj). Central multi-modal funnel vs. asymmetric banana valley.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.05 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.05
+      },
+      "0.01": {
+        "eps_archive": 0.130639
+      },
+      "0.05": {
+        "eps_archive": 0.131025
+      },
+      "0.1": {
+        "eps_archive": 0.12303
+      },
+      "0.2": {
+        "eps_archive": 0.129323
+      }
     },
     "all_valley_8d": {
       "_comment": "Benchmark 24 - All-Valley Trade-off (D=8, 4 obj). Four competing narrow-valley ridge floors.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 16, "eps_archive": 1.0 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 16,
+        "eps_archive": 1000.0
+      },
+      "0.01": {
+        "eps_archive": 0.381352
+      },
+      "0.05": {
+        "eps_archive": 0.357773
+      },
+      "0.1": {
+        "eps_archive": 0.362425
+      },
+      "0.2": {
+        "eps_archive": 0.389323
+      }
     },
     "alpine_12d": {
       "_comment": "Benchmark 16 - 3-obj shifted Alpine N.1 (D=12, 3 obj). Non-differentiable kinks.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 24, "eps_archive": 1.0 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 24,
+        "eps_archive": 10.0
+      },
+      "0.01": {
+        "eps_archive": 0.461991
+      },
+      "0.05": {
+        "eps_archive": 0.446975
+      },
+      "0.1": {
+        "eps_archive": 0.428795
+      },
+      "0.2": {
+        "eps_archive": 0.425286
+      }
     },
     "dixon_price_10d": {
       "_comment": "Benchmark 14 - Dixon-Price vs Sphere (D=10, 2 obj). Ill-conditioned narrow valley.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 20, "eps_archive": 0.05 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 20,
+        "eps_archive": 0.05
+      },
+      "0.01": {
+        "eps_archive": 0.224937
+      },
+      "0.05": {
+        "eps_archive": 0.189118
+      },
+      "0.1": {
+        "eps_archive": 0.176838
+      },
+      "0.2": {
+        "eps_archive": 0.173235
+      }
     },
     "dixon_rosenbrock_sphere_12d": {
       "_comment": "Benchmark 22 - Dixon-Price vs. Rosenbrock vs. Sphere (D=12, 3 obj). Two narrow valleys against a smooth sphere; hyper-precise gradient tracking required.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 24, "eps_archive": 0.05 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 24,
+        "eps_archive": 0.05
+      },
+      "0.01": {
+        "eps_archive": 0.264396
+      },
+      "0.05": {
+        "eps_archive": 0.262833
+      },
+      "0.1": {
+        "eps_archive": 0.255705
+      },
+      "0.2": {
+        "eps_archive": 0.253716
+      }
     },
     "dtlz1_12d": {
       "_comment": "Benchmark 8 - contextual DTLZ1 (D=12, 4 obj). Rastrigin-based multi-modal context.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 24, "eps_archive": 1.0 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 24,
+        "eps_archive": 20.0
+      },
+      "0.01": {
+        "eps_archive": 0.211988
+      },
+      "0.05": {
+        "eps_archive": 0.296827
+      },
+      "0.1": {
+        "eps_archive": 0.33795
+      },
+      "0.2": {
+        "eps_archive": 0.367541
+      }
     },
     "dtlz2_6d": {
       "_comment": "Benchmark 4 - contextual DTLZ2 (D=6, 4 obj).",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 12, "eps_archive": 1.0 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 12,
+        "eps_archive": 0.1
+      },
+      "0.01": {
+        "eps_archive": 0.0711126
+      },
+      "0.05": {
+        "eps_archive": 0.0944058
+      },
+      "0.1": {
+        "eps_archive": 0.0990891
+      },
+      "0.2": {
+        "eps_archive": 0.114522
+      }
     },
     "dtlz3_8d": {
       "_comment": "Benchmark 11 - contextual DTLZ3 (D=8, 4 obj). Rastrigin-based multi-modal context.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 16, "eps_archive": 1.0 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 16,
+        "eps_archive": 20.0
+      },
+      "0.01": {
+        "eps_archive": 0.0994995
+      },
+      "0.05": {
+        "eps_archive": 0.22011
+      },
+      "0.1": {
+        "eps_archive": 0.271341
+      },
+      "0.2": {
+        "eps_archive": 0.349597
+      }
     },
     "dtlz4_12d": {
       "_comment": "Benchmark 13 - contextual DTLZ4 (D=12, 3 obj). Biased density, alpha=100.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 24, "eps_archive": 0.2 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 24,
+        "eps_archive": 0.2
+      },
+      "0.01": {
+        "eps_archive": 0.0109329
+      },
+      "0.05": {
+        "eps_archive": 0.0120846
+      },
+      "0.1": {
+        "eps_archive": 0.0130906
+      },
+      "0.2": {
+        "eps_archive": 0.0140029
+      }
     },
     "dtlz7_6d": {
       "_comment": "Benchmark 6 - contextual DTLZ7 (D=6, 3 obj). Disconnected Pareto front.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 1.0 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 1.0
+      },
+      "0.01": {
+        "eps_archive": 0.124778
+      },
+      "0.05": {
+        "eps_archive": 0.141067
+      },
+      "0.1": {
+        "eps_archive": 0.15782
+      },
+      "0.2": {
+        "eps_archive": 0.183128
+      }
     },
     "ellipsoid_20d": {
       "_comment": "Benchmark 7 - ill-conditioned ellipsoid (D=20, 2 obj). ARD/relevance diagnostic.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 40, "eps_archive": 0.01 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 40,
+        "eps_archive": 0.1
+      },
+      "0.01": {
+        "eps_archive": 0.255716
+      },
+      "0.05": {
+        "eps_archive": 0.237711
+      },
+      "0.1": {
+        "eps_archive": 0.246805
+      },
+      "0.2": {
+        "eps_archive": 0.238549
+      }
     },
     "ellipsoid_rastrigin_20d": {
       "_comment": "Benchmark 21 - Ellipsoid vs. Rastrigin (D=20, 2 obj). ARD stress test: ill-conditioned scaling vs. equal multi-modal variance across all dims.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 40, "eps_archive": 0.01 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 40,
+        "eps_archive": 0.01
+      },
+      "0.01": {
+        "eps_archive": 0.323245
+      },
+      "0.05": {
+        "eps_archive": 0.306811
+      },
+      "0.1": {
+        "eps_archive": 0.296602
+      },
+      "0.2": {
+        "eps_archive": 0.320312
+      }
     },
     "griewank_16d": {
       "_comment": "Benchmark 15 - 4-obj shifted Griewank (D=16, 4 obj). Macro-convex micro-rugged.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 32, "eps_archive": 1.0 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 32,
+        "eps_archive": 0.1
+      },
+      "0.01": {
+        "eps_archive": 0.0150805
+      },
+      "0.05": {
+        "eps_archive": 0.0174109
+      },
+      "0.1": {
+        "eps_archive": 0.0185175
+      },
+      "0.2": {
+        "eps_archive": 0.0200073
+      }
     },
     "griewank_vlmop2_16d": {
       "_comment": "Benchmark 26 - Griewank vs. VLMOP2 (D=16, 3 obj). Jagged gradient everywhere vs. exponentially flat landscape; tests mixed gradient-information regimes.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 32, "eps_archive": 0.05 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 32,
+        "eps_archive": 0.05
+      },
+      "0.01": {
+        "eps_archive": 0.00235878
+      },
+      "0.05": {
+        "eps_archive": 0.000606344
+      },
+      "0.1": {
+        "eps_archive": 0.000510117
+      },
+      "0.2": {
+        "eps_archive": 0.000470188
+      }
     },
     "heterogeneous_quadrants_6d": {
       "_comment": "Benchmark 20 - Heterogeneous Quadrants (D=6, 4 obj). Sphere, Ackley, Rastrigin, and Griewank shifted into four conflicting quadrants.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 12, "eps_archive": 1.0 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 12,
+        "eps_archive": 10.0
+      },
+      "0.01": {
+        "eps_archive": 0.423307
+      },
+      "0.05": {
+        "eps_archive": 0.484761
+      },
+      "0.1": {
+        "eps_archive": 0.491638
+      },
+      "0.2": {
+        "eps_archive": 0.501631
+      }
     },
     "levy_16d": {
       "_comment": "Benchmark 10 - 3-obj shifted Levy (D=16, 3 obj). Rugged multimodal high-D.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 32, "eps_archive": 0.01 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 32,
+        "eps_archive": 0.1
+      },
+      "0.01": {
+        "eps_archive": 0.39821
+      },
+      "0.05": {
+        "eps_archive": 0.396179
+      },
+      "0.1": {
+        "eps_archive": 0.394427
+      },
+      "0.2": {
+        "eps_archive": 0.390382
+      }
     },
     "multimodal_trap_20d": {
       "_comment": "Benchmark 3 - rugged high-D stress test (D=20, 3 obj). Higher budget for dimension.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 40, "eps_archive": 0.01 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 40,
+        "eps_archive": 0.1
+      },
+      "0.01": {
+        "eps_archive": 0.393702
+      },
+      "0.05": {
+        "eps_archive": 0.384665
+      },
+      "0.1": {
+        "eps_archive": 0.377611
+      },
+      "0.2": {
+        "eps_archive": 0.36167
+      }
     },
     "rastrigin_griewank_sphere_20d": {
       "_comment": "Benchmark 18 - Rastrigin vs. Griewank vs. Sphere (D=20, 3 obj). Three different macroscopic structures: massive independent local optima, micro-rugged cosine interference, and a smooth conflicting anchor.",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 40, "eps_archive": 0.01 }
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 40,
+        "eps_archive": 0.01
+      },
+      "0.01": {
+        "eps_archive": 0.264296
+      },
+      "0.05": {
+        "eps_archive": 0.270225
+      },
+      "0.1": {
+        "eps_archive": 0.269394
+      },
+      "0.2": {
+        "eps_archive": 0.281878
+      }
     },
     "rosenbrock_sphere_6d": {
       "_comment": "Benchmark 2 - contextual Rosenbrock vs sphere (D=6, 2 obj).",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.02 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.02
+      },
+      "0.01": {
+        "eps_archive": 0.232284
+      },
+      "0.05": {
+        "eps_archive": 0.247575
+      },
+      "0.1": {
+        "eps_archive": 0.242419
+      },
+      "0.2": {
+        "eps_archive": 0.241096
+      }
     },
     "schwefel_styblinski_sphere_20d": {
-      "_comment": "Benchmark 25 - Schwefel vs. Styblinski-Tang vs. Sphere (D=20, 3 obj). Boundary-hidden global optimum (Schwefel) vs. massive internal basins; Schwefel inputs scaled ×100 to map [-500,500] into [-5,5].",
-      "defaults": { "budget": 200, "batch_size": 8, "n_init": 40, "eps_archive": 0.01 }
+      "_comment": "Benchmark 25 - Schwefel vs. Styblinski-Tang vs. Sphere (D=20, 3 obj). Boundary-hidden global optimum (Schwefel) vs. massive internal basins; Schwefel inputs scaled \u00d7100 to map [-500,500] into [-5,5].",
+      "defaults": {
+        "budget": 200,
+        "batch_size": 8,
+        "n_init": 40,
+        "eps_archive": 0.01
+      },
+      "0.01": {
+        "eps_archive": 0.64508
+      },
+      "0.05": {
+        "eps_archive": 0.570398
+      },
+      "0.1": {
+        "eps_archive": 0.555711
+      },
+      "0.2": {
+        "eps_archive": 0.552105
+      }
     },
     "spacecraft_formation_flying_a1": {
-      "_comment": "Real Basilisk/Slurm simulation (D=16, 3 constraints). n_init draws from pre-filtered historical pool. Difficulty keys 1–4 select (rmse_m, fuel_g, thrust_n) constraint thresholds; pass --threshold_pct 1|2|3|4.",
-      "defaults": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 0.1 },
-      "1": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 100.0 },
-      "2": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 100.0 },
-      "3": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 100.0 },
-      "4": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 100.0 },
-      "5": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 100.0 },
-      "6": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 100.0 },
-      "7": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 100.0 },
-      "8": { "budget": 60, "batch_size": 6, "n_init": 20, "eps_archive": 100.0 }
+      "_comment": "Real Basilisk/Slurm simulation (D=16, 3 constraints). n_init draws from pre-filtered historical pool. Difficulty keys 1\u20134 select (rmse_m, fuel_g, thrust_n) constraint thresholds; pass --threshold_pct 1|2|3|4.",
+      "defaults": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 0.1
+      },
+      "1": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 100.0
+      },
+      "2": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 0.386491
+      },
+      "3": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 0.321768
+      },
+      "4": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 0.269747
+      },
+      "5": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 0.319197
+      },
+      "6": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 0.274453
+      },
+      "7": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 0.299278
+      },
+      "8": {
+        "budget": 60,
+        "batch_size": 6,
+        "n_init": 20,
+        "eps_archive": 0.265486
+      },
+      "10": {
+        "eps_archive": 0.381998
+      },
+      "9": {
+        "eps_archive": 0.308985
+      }
     },
     "sphere2_6d": {
       "_comment": "Benchmark 1 - 2-obj shifted sphere (D=6, 2 obj). Convex baseline.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.01 },
-      "0.2":  { "budget": 100, "batch_size": 4, "n_init": 12 },
-      "0.1":  { "budget": 100, "batch_size": 4, "n_init": 12 },
-      "0.05": { "budget": 100, "batch_size": 4, "n_init": 12 },
-      "0.01": { "budget": 100, "batch_size": 4, "n_init": 12 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.01
+      },
+      "0.2": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.277887
+      },
+      "0.1": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.267592
+      },
+      "0.05": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.262603
+      },
+      "0.01": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.259706
+      }
     },
     "styblinski_tang_6d": {
       "_comment": "Benchmark 5 - multi-modal Styblinski-Tang (D=6, 2 obj). Multi-modal trap variant of sphere2_6d.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.01 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.01
+      },
+      "0.01": {
+        "eps_archive": 0.278735
+      },
+      "0.05": {
+        "eps_archive": 0.250681
+      },
+      "0.1": {
+        "eps_archive": 0.235186
+      },
+      "0.2": {
+        "eps_archive": 0.196951
+      }
     },
     "styblinski_tang_levy_10d": {
       "_comment": "Benchmark 19 - Styblinski-Tang vs. Levy (D=10, 2 obj). Two different deceptive local-minimum styles: nested polynomial-trigonometric trap vs. massive disjoint polynomial basins.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 20, "eps_archive": 0.05 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 20,
+        "eps_archive": 0.05
+      },
+      "0.01": {
+        "eps_archive": 0.321923
+      },
+      "0.05": {
+        "eps_archive": 0.290993
+      },
+      "0.1": {
+        "eps_archive": 0.277387
+      },
+      "0.2": {
+        "eps_archive": 0.24918
+      }
     },
     "vlmop2_6d": {
       "_comment": "Benchmark 12 - VLMOP2 (D=6, 2 obj). Vanishing gradient / flat landscape.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.05 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.05
+      },
+      "0.01": {
+        "eps_archive": 0.0380819
+      },
+      "0.05": {
+        "eps_archive": 0.0378437
+      },
+      "0.1": {
+        "eps_archive": 0.0329761
+      },
+      "0.2": {
+        "eps_archive": 0.0211603
+      }
     },
     "zakharov_ackley_10d": {
       "_comment": "Benchmark 23 - Zakharov vs. Ackley (D=10, 2 obj). Steep asymmetric plate with correlated gradients vs. flat outer/deep-center multi-modal funnel.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 20, "eps_archive": 0.05 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 20,
+        "eps_archive": 0.05
+      },
+      "0.01": {
+        "eps_archive": 0.08853
+      },
+      "0.05": {
+        "eps_archive": 0.0943528
+      },
+      "0.1": {
+        "eps_archive": 0.0902764
+      },
+      "0.2": {
+        "eps_archive": 0.0909317
+      }
     },
     "zdt3_6d": {
       "_comment": "Benchmark 9 - contextual ZDT3 (D=6, 2 obj). Disconnected Pareto front.",
-      "defaults": { "budget": 100, "batch_size": 4, "n_init": 12, "eps_archive": 0.1 }
+      "defaults": {
+        "budget": 100,
+        "batch_size": 4,
+        "n_init": 12,
+        "eps_archive": 0.1
+      },
+      "0.01": {
+        "eps_archive": 0.0578147
+      },
+      "0.05": {
+        "eps_archive": 0.0802691
+      },
+      "0.1": {
+        "eps_archive": 0.0950653
+      },
+      "0.2": {
+        "eps_archive": 0.105817
+      }
     }
   }
 }

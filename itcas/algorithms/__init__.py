@@ -17,6 +17,11 @@ from .quality import (
     efig_quality,
     edig_quality,
     ndig_quality,
+    cr_ndig_quality,
+    c2lse_quality,
+    bes_quality,
+    interior_sampling_quality,
+    sigma_combined,
     register_quality,
 )
 from .qd_dpp import (
@@ -40,6 +45,11 @@ __all__ = [
     "efig_quality",
     "edig_quality",
     "ndig_quality",
+    "cr_ndig_quality",
+    "c2lse_quality",
+    "bes_quality",
+    "interior_sampling_quality",
+    "sigma_combined",
     "build_quality_fn",
     "available_qualities",
     "register_quality",

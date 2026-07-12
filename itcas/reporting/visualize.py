@@ -92,8 +92,10 @@ def _load_run(jsonl_path: Path) -> Optional[RunSeries]:
     # When a method has named quality sub-variants (e.g. itcas/efig vs
     # itcas/roi_mi), include the variant in the method label so each
     # sub-variant gets its own curve instead of being averaged together.
+    # Covers both `itcas` (batch) and its forced-sequential sibling
+    # `itcas_seq`, e.g. -> "itcas_ndig" / "itcas_seq_ndig".
     quality = cfg.get("quality")
-    if quality and method == "itcas":
+    if quality and method in ("itcas", "itcas_seq"):
         method = f"{method}_{quality}"
     seed = int(cfg.get("seed", 0))
     n_init = int(summary.get("n_init", cfg.get("n_init", 0)))

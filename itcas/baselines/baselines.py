@@ -12,17 +12,19 @@ in `cas_family.py`. Stubs remain for `eps_constraint` and `moo_cluster`.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 from botorch.models import SingleTaskGP
 
+from ..algorithms.quality import sigma_combined
 from ..algorithms.roi_mi import (
     feasibility_probabilities,
     joint_feasibility_probability,
     _binary_entropy,
 )
 from ..utils.gp import posterior_mean_std
+from .batch_dpp import score_to_dpp_batch
 
 
 def random_baseline(
@@ -34,6 +36,27 @@ def random_baseline(
         g.manual_seed(rng_seed)
     idx = torch.randperm(cand.shape[0], generator=g)[:batch_size].tolist()
     return idx, {"baseline": "random"}
+
+
+def random_batch(
+    models, cand: torch.Tensor, h, batch_size: int = 1,
+    context_dims: Optional[Sequence[int]] = None,
+    dpp_lambda: Optional[float] = None, dpp_lambda_ctx: Optional[float] = None,
+    **kwargs,
+):
+    """Random + DPP: pure space-filling diversity, no acquisition greediness.
+
+    There is no meaningful acquisition score for Random; per the plan doc,
+    "Random + DPP" is a diversity-enforced (space-filling) baseline, so every
+    candidate gets uniform quality 1.0 and the batch is chosen purely by the
+    QD-DPP diversity kernel (objective-space and, if available, context-space).
+    """
+    score = torch.ones(cand.shape[0], dtype=cand.dtype, device=cand.device)
+    idx = score_to_dpp_batch(
+        models, cand, score, batch_size,
+        context_dims=context_dims, dpp_lambda=dpp_lambda, dpp_lambda_ctx=dpp_lambda_ctx,
+    )
+    return idx, {"baseline": "random_batch", "score": score.detach().cpu()}
 
 
 def one_step_active_search(
@@ -74,17 +97,114 @@ def eisr(
 
 def straddle(
     models, cand: torch.Tensor, h: torch.Tensor, batch_size: int = 1,
-    beta: float = 1.96, **kwargs,
+    beta: float = 1.96, t: int = 0, **kwargs,
 ):
-    """STRADDLE: alternates objectives; alpha_i = beta*sigma_i - |mu_i - h_i|.
+    """STRADDLE: single-objective alpha_i = beta*sigma_i - |mu_i - h_i|,
+    applied via round-robin objective alternation.
 
-    Multi-objective adaptation: pick the objective via round-robin per call,
-    or aggregate min over objectives. Here we use the min aggregation.
+    Multi-objective adaptation: rather than aggregating the per-objective
+    scores, the acquisition uses *only* objective ``active_obj = t % m``
+    (``m = h.numel()``) on pipeline iteration ``t``, cycling through all
+    objectives round-robin across iterations. ``t`` defaults to 0 so direct/
+    legacy calls without it degenerate to always-objective-0.
     """
     mu, sigma = posterior_mean_std(models, cand)
-    score = (beta * sigma - (mu - h).abs()).min(dim=-1).values
+    m = h.numel()
+    active_obj = t % m
+    score = beta * sigma[:, active_obj] - (mu[:, active_obj] - h[active_obj]).abs()
     idx = torch.topk(score, k=batch_size).indices.tolist()
-    return idx, {"baseline": "straddle", "score": score.detach().cpu()}
+    return idx, {
+        "baseline": "straddle",
+        "score": score.detach().cpu(),
+        "active_obj": int(active_obj),
+    }
+
+
+def straddle_batch(
+    models, cand: torch.Tensor, h: torch.Tensor, batch_size: int = 1,
+    beta: float = 1.96, context_dims: Optional[Sequence[int]] = None,
+    dpp_lambda: Optional[float] = None, dpp_lambda_ctx: Optional[float] = None,
+    **kwargs,
+):
+    """STRADDLE + DPP: full-pool straddle score fed into the QD-DPP L-ensemble.
+
+    Reuses ``straddle``'s full-pool score (batch_size=cand.shape[0] makes the
+    base call score every candidate, which it already does before top-k) so
+    the acquisition math is identical to the sequential baseline; only the
+    selection mechanism changes from top-k to greedy submodular diversity.
+    """
+    _, info = straddle(models, cand, h, batch_size=cand.shape[0], beta=beta, **kwargs)
+    score = info["score"].to(cand)
+    idx = score_to_dpp_batch(
+        models, cand, score, batch_size,
+        context_dims=context_dims, dpp_lambda=dpp_lambda, dpp_lambda_ctx=dpp_lambda_ctx,
+    )
+    return idx, {
+        "baseline": "straddle_batch",
+        "score": score.detach().cpu(),
+        "active_obj": info["active_obj"],
+    }
+
+
+_INTERIOR_POF_TARGET = 0.95  # per contexts/fair_lse_comparison.md Mechanism 3
+
+
+def interior_sampling_discrete(
+    models, cand: torch.Tensor, h: torch.Tensor, batch_size: int = 1,
+    pof_target: float = _INTERIOR_POF_TARGET, **kwargs,
+):
+    """Discrete-pool Stage-2 ("Interior") acquisition (Family C).
+
+    Filters the candidate pool by joint PoF(z) >= ``pof_target`` (default
+    0.95) and, among the survivors, picks the highest ``sigma_combined``
+    (L2 magnitude of the per-objective posterior std, see
+    ``algorithms.quality.sigma_combined``). Score is set to 0 for any
+    candidate that fails the PoF gate so it can never be selected by
+    ``topk``. If *no* candidate clears the PoF gate the score is uniformly
+    zero and the caller's existing empty-index fallback
+    (``pipeline.loop._fallback_indices``) takes over -- this function
+    intentionally returns an empty-scored vector rather than reimplementing
+    that fallback itself, to stay consistent with how every other baseline's
+    degenerate case is already handled by ``run_experiment``.
+    """
+    mu, sigma = posterior_mean_std(models, cand)
+    pof = joint_feasibility_probability(feasibility_probabilities(mu, sigma, h))
+    feasible_mask = pof >= pof_target
+    sc = sigma_combined(models, cand)
+    score = torch.where(feasible_mask, sc, torch.zeros_like(sc))
+    k = min(batch_size, cand.shape[0])
+    if k <= 0 or not bool(feasible_mask.any()):
+        return [], {"baseline": "interior_sampling", "score": score.detach().cpu(), "stage": "interior"}
+    idx = torch.topk(score, k=k).indices.tolist()
+    return idx, {"baseline": "interior_sampling", "score": score.detach().cpu(), "stage": "interior"}
+
+
+def interior_sampling_discrete_batch(
+    models, cand: torch.Tensor, h: torch.Tensor, batch_size: int = 1,
+    pof_target: float = _INTERIOR_POF_TARGET,
+    context_dims: Optional[Sequence[int]] = None,
+    dpp_lambda: Optional[float] = None, dpp_lambda_ctx: Optional[float] = None,
+    **kwargs,
+):
+    """Interior Sampling + DPP: PoF-gated sigma_combined score fed into the QD-DPP L-ensemble.
+
+    Zero-quality (PoF-failing) candidates cannot be selected by
+    ``greedy_dpp_batch`` (its L-ensemble diagonal is 0 for them, so their
+    marginal gain is 0 and the greedy loop breaks before picking them) --
+    this gives the PoF>=0.95 constraint "for free" via the same clamp-at-0
+    PSD requirement documented in ``batch_dpp.score_to_dpp_batch``, without
+    new plumbing. If no candidate clears the gate, ``score_to_dpp_batch``
+    returns an empty list and the caller's existing fallback takes over.
+    """
+    _, info = interior_sampling_discrete(
+        models, cand, h, batch_size=cand.shape[0], pof_target=pof_target,
+    )
+    score = info["score"].to(cand)
+    idx = score_to_dpp_batch(
+        models, cand, score, batch_size,
+        context_dims=context_dims, dpp_lambda=dpp_lambda, dpp_lambda_ctx=dpp_lambda_ctx,
+    )
+    return idx, {"baseline": "interior_sampling_batch", "score": score.detach().cpu(), "stage": "interior"}
 
 
 def eps_constraint_bo(*args, **kwargs):
@@ -97,10 +217,14 @@ def moo_cluster(*args, **kwargs):
 
 REGISTRY = {
     "random": random_baseline,
+    "random_batch": random_batch,
     "one_step": one_step_active_search,
     "ez": ez_mutual_information,
     "eisr": eisr,
     "straddle": straddle,
+    "straddle_batch": straddle_batch,
+    "interior_sampling": interior_sampling_discrete,
+    "interior_sampling_batch": interior_sampling_discrete_batch,
     "eps_constraint": eps_constraint_bo,
     "moo_cluster": moo_cluster,
 }

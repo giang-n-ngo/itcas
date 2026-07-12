@@ -37,14 +37,48 @@ def parse_args(argv=None) -> tuple[ExperimentConfig, str]:
     p = argparse.ArgumentParser("itcas")
     p.add_argument("--config", type=str, default=None)
     p.add_argument("--problem", type=str, default="two_circles_2d")
-    p.add_argument("--method", type=str, default="itcas")
+    p.add_argument(
+        "--method", type=str, default="itcas",
+        help="Acquisition method. 'itcas' (proposed; batch, quality set via --quality). "
+             "'itcas_seq' is the forced-sequential sibling of 'itcas': same "
+             "--quality machinery (e.g. ndig), but always one point per "
+             "iteration (batch_size=1) regardless of --batch_size, unlike bare "
+             "'itcas' which honors --batch_size. "
+             "Sequential discrete-pool baselines: 'random', 'one_step', 'ez', 'eisr', "
+             "'straddle', 'cas_eci', 'moc_cas_hard', 'moc_cas_soft', 'eps_constraint', "
+             "'moo_cluster'. Sequential continuous baselines (Family B, each with a "
+             "fixed quality variant of the same name, optimized via the same continuous "
+             "multistart machinery as itcas): 'c2lse', 'bes'. 'cr_ndig' (contexts/"
+             "sequential_ndig.md) is a purely-sequential context-repulsive NDIG "
+             "variant with a fixed quality of the same name (no --quality flag "
+             "needed, exactly like 'c2lse'/'bes') and no '_batch' sibling. "
+             "DPP-batch siblings "
+             "(same acquisition score/quality, but select a batch of --batch_size via "
+             "greedy QD-DPP instead of one point per iteration): append '_batch', e.g. "
+             "'random_batch', 'straddle_batch', 'cas_eci_batch', 'moc_cas_hard_batch', "
+             "'c2lse_batch', 'bes_batch'. Family-C two-stage 'hybrid "
+             "cartographer' baselines: 'straddle_then_sample', 'c2lse_then_sample', "
+             "'bes_then_sample' (+ '_batch' siblings) run the named "
+             "Stage-1 base acquisition for the first fraction of the budget "
+             "then switch to penalized combined-uncertainty interior sampling "
+             "(joint PoF >= 0.95) for the rest. Every Family-C method MUST carry an "
+             "explicit '_lseNN' suffix (NN an integer percentage in [1, 99]) before "
+             "any '_batch' suffix -- there is no bare spelling -- e.g. "
+             "'straddle_then_sample_lse50' (the default 50/50 split), "
+             "'straddle_then_sample_lse10' (10% LSE / 90% interior sampling), "
+             "'c2lse_then_sample_lse25_batch' (25% LSE, batch sibling). "
+             "(RMILE was implemented and removed: too expensive.)",
+    )
     p.add_argument(
         "--quality", type=str, default=None,
         help="itcas candidate-quality variant feeding the QD-DPP: "
              "'roi_mi' (global region-of-interest MI, default), "
              "'efig' (PoF-weighted info gain), "
              "'edig' (depth-weighted info gain, resolves EFIG saturation/cold-start), or "
-             "'ndig' (rationally-squashed depth-weighted info gain, restores DPP context diversity).",
+             "'ndig' (rationally-squashed depth-weighted info gain, restores DPP context diversity). "
+             "Only applies to --method itcas; the Family-B continuous baselines "
+             "('c2lse'/'bes' and their '_batch' siblings) always use their own "
+             "fixed quality variant of the same name and ignore this flag.",
     )
     p.add_argument("--budget", type=int, default=None)
     p.add_argument("--batch_size", type=int, default=None)

@@ -1,0 +1,29 @@
+{
+    "default_difficulty": 0.1,
+    "lse_proportions": [10, 25, 50],
+    "problems": [
+        "all_valley_8d",
+        "alpine_12d",
+        "dtlz1_12d",
+        "dtlz2_6d",
+        "dtlz3_8d"
+    ],
+    "sequential_methods":{
+        "lse": [
+            "straddle_then_sample"
+        ],
+        "cas": [
+            "cas_eci",
+            "moc_cas_hard"
+        ]
+    },
+    "batch_methods": {
+        "lse": [
+            "straddle_then_sample"
+        ],
+        "cas": [
+            "cas_eci_batch",
+            "moc_cas_hard_batch"
+        ]
+    }
+}

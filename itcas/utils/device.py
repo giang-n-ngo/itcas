@@ -31,20 +31,36 @@ def _cuda_kernels_runnable(device: torch.device) -> tuple[bool, str]:
     first kernel launch fails with "no kernel image is available for execution
     on the device". We probe with a trivial op so we can fail fast (or fall
     back) with an actionable message instead of crashing deep inside a run.
+
+    The same trivial allocation also fails when the GPU's memory is already
+    exhausted by other processes (e.g. too many concurrent seeds sharing one
+    GPU) — that failure mode has nothing to do with compute capability, so it
+    gets its own message with different actionable advice.
     """
     try:
         _ = torch.zeros(1, device=device).add_(1).sum().item()
         return True, ""
     except Exception as e:  # pragma: no cover - hardware dependent
         try:
+            name = torch.cuda.get_device_name(device)
+        except Exception:
+            name = "unknown"
+
+        if "out of memory" in str(e).lower():
+            return False, (
+                f"CUDA device '{device}' ({name}) is visible but out of memory: "
+                f"even a 1-element allocation failed, so another process already "
+                f"holds the GPU's memory (e.g. too many concurrent seeds sharing "
+                f"this GPU, or a leftover process from a prior job). Probe error: {e} "
+                f"Reduce n_concurrent for this GPU, wait for other jobs on the "
+                f"node to finish, or exclude the node."
+            )
+
+        try:
             major, minor = torch.cuda.get_device_capability(device)
             cap = f"sm_{major}{minor}"
         except Exception:
             cap = "unknown"
-        try:
-            name = torch.cuda.get_device_name(device)
-        except Exception:
-            name = "unknown"
         try:
             supported = ", ".join(torch.cuda.get_arch_list())
         except Exception:
@@ -52,7 +68,9 @@ def _cuda_kernels_runnable(device: torch.device) -> tuple[bool, str]:
         return False, (
             f"CUDA device '{device}' ({name}, capability {cap}) is visible but "
             f"the installed PyTorch build cannot launch kernels on it. "
-            f"Supported archs: [{supported}]. Probe error: {e}"
+            f"Supported archs: [{supported}]. Probe error: {e} "
+            f"Install a PyTorch build supporting this GPU's compute capability, "
+            f"or exclude the offending Slurm node."
         )
 
 
@@ -97,8 +115,6 @@ def resolve_device(spec: Optional[Union[str, torch.device]] = "auto") -> torch.d
         if not ok:
             raise RuntimeError(
                 f"Requested device '{spec}' but it is not runnable. {msg} "
-                f"Either install a PyTorch build supporting this GPU's compute "
-                f"capability, exclude the offending Slurm node, or set "
-                f"device='auto'/'cpu'."
+                f"Or set device='auto'/'cpu'."
             )
     return device
