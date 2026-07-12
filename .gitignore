@@ -2,7 +2,6 @@
 /contexts/
 .github/
 results/
-scripts/
 slurm_logs/
 itcas/__pycache__/
 itcas/algorithms/__pycache__/

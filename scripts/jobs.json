@@ -1,0 +1,33 @@
+{
+  "_comment": "ITCAS GPU sweep job spec. Jobs can be listed explicitly in jobs.separate and/or generated in jobs.group via cartesian products (methods x problems x difficulties, with quality only combined for method=itcas). Each expanded entry is ONE Slurm job: one (method, problem, difficulty[, quality]) over a seed range on a single GPU, executing n_concurrent seeds at a time until complete. Fields omitted in a job inherit from defaults. NOTE: budget/batch_size/n_init are problem+difficulty dependent and live in experiments_path (configs/experiments.json), NOT here.",
+  "defaults": {
+    "experiments_path": "configs/experiments.json",
+    "thresholds_path": "configs/thresholds.json",
+    "results_root": "results/sweep",
+    "device": "cuda",
+    "n_concurrent": 8
+  },
+  "jobs": {
+    "separate": [],
+    "group": [
+      {
+        "_comment": "",
+        "methods": [
+          "straddle_then_sample_lse10_batch",
+          "straddle_then_sample_lse25",
+          "straddle_then_sample_lse25_batch"
+        ],
+        "problems": [
+          "styblinski_tang_6d",
+          "styblinski_tang_levy_10d",
+          "zdt3_6d"
+        ],
+        "difficulties": [0.01, 0.05, 0.1, 0.2],
+        "quality": [
+        ],
+        "seeds": "0-19",
+        "n_concurrent": 4
+      }
+    ]
+  }
+}
