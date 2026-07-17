@@ -7,6 +7,7 @@ from .metrics import (  # noqa: F401
     feasible_convex_hull_volume,
     is_feasible,
     positive_samples,
+    transform_feasible_for_archive,
 )
 from .reference import (  # noqa: F401
     ReferenceData,

@@ -408,19 +408,7 @@ def plot_problem_landscape(
             fontweight="bold",
         )
 
-    fig.suptitle(
-        f"{problem.name}  --  2D slice varying design dims x{dim_a}, x{dim_b} "
-        f"(d={problem.d}, m={problem.m})\n"
-        f"per-objective + joint panels: marginalized over the other "
-        f"{problem.d - 2} dims via {mc_samples} MC draws/cell "
-        f"(grid {grid_n}x{grid_n}); joint panel top-k matched to target area\n"
-        f"last panel: {n_scatter} full-dimensional uniform samples, random 2D "
-        f"projection, direct (unmatched) feasibility sample\n"
-        f"rows: calibrated difficulty levels (target global joint-feasible "
-        f"fraction p), easiest at top",
-        fontsize=10,
-    )
-    fig.tight_layout(rect=(0.03, 0.0, 1.0, 0.88))
+    fig.tight_layout(rect=(0.03, 0.0, 1.0, 1.0))
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

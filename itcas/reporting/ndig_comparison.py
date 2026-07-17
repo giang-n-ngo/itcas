@@ -27,9 +27,27 @@ silently rescale the sequential methods' x-axis by a factor the batch method
 doesn't share).
 
 Plots reuse :mod:`itcas.reporting.batch_vs_sequential`'s generic (non-family-
-specific) discovery/grid-layout helpers directly: one grid figure per
-"standard" difficulty (rows = problems), plus one for
-``spacecraft_formation_flying_a1`` (rows = its own 10 difficulty levels).
+specific) discovery/grid-layout helpers directly, mirroring the layout
+:func:`itcas.reporting.summary.summarize_synthetic_comparison` settled on --
+one PDF per row rather than one combined grid, plus two standalone
+cross-row summary figures:
+
+* One single-row PDF per problem (for the "standard" difficulties) or per
+  difficulty level (for ``spacecraft_formation_flying_a1``): metric curves +
+  raw product, no product-rank column (``include_product_rank_column=
+  False`` -- that per-iteration "who's ahead right now" column only made
+  sense across a shared grid; split one-row-per-PDF it adds nothing beyond
+  the curves already shown).
+* One standalone **average-rank** figure per difficulty (standard) or for
+  the whole spacecraft problem: each method's average rank (1 = best) per
+  metric + product, averaged across that difficulty's rows, via
+  :func:`itcas.reporting.ranking.average_ranks_over_rows` and
+  :func:`itcas.reporting.summary._plot_avg_rank_figure`.
+* One standalone **relative-AUC ("relative ranking")** figure alongside it:
+  for each metric (+ product), every (method, seed) AUC divided by the best
+  AUC seen anywhere in that row, averaged over seeds then over rows, via
+  :func:`itcas.reporting.ranking.relative_auc_ratios_over_rows` and
+  :func:`itcas.reporting.summary._plot_relative_auc_figure`.
 
 Statistics: unlike ``batch_vs_sequential`` (which only ever has two
 conditions per family and therefore skips the Friedman gate), this report has
@@ -54,6 +72,7 @@ import argparse
 from pathlib import Path
 from typing import Optional
 
+from . import ranking
 from .batch_vs_sequential import (
     _AXIS,
     _SPACECRAFT_PROBLEM,
@@ -66,7 +85,13 @@ from .batch_vs_sequential import (
     plot_group_grid,
 )
 from .stats import GroupResult, StatsReport, _fmt, _sig_marker, report_to_json, run_stats
-from .summary import CurveCache, _precompute
+from .summary import (
+    CurveCache,
+    _metrics_present_in_rows,
+    _plot_avg_rank_figure,
+    _plot_relative_auc_figure,
+    _precompute,
+)
 
 _DEFAULT_PROBLEMS_CONFIG = "configs/final_problems.json"
 _DEFAULT_OUTPUT_DIR = "results/ndig_comparison"
@@ -88,12 +113,67 @@ _METHOD_STYLES: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
+def _emit_row_pdfs(
+    rows: list,
+    row_kind: str,
+    out_dir: Path,
+    file_prefix: str,
+    title_prefix: str,
+) -> list[str]:
+    """One single-row PDF per entry in ``rows`` (see module docstring)."""
+    paths: list[str] = []
+    for row_label, row_runs, row_cache in rows:
+        title = f"{title_prefix} -- {row_label} ({row_kind}) vs total individual evaluations"
+        out_path = out_dir / f"{file_prefix}_{row_label}_vs_evaluations.pdf"
+        ok = plot_group_grid(
+            list(METHODS), _METHOD_STYLES, [(row_label, row_runs, row_cache)], title, out_path,
+            include_product_rank_column=False,
+        )
+        if ok is not None:
+            paths.append(str(ok))
+    return paths
+
+
+def _emit_rank_summary_pdfs(
+    rows: list,
+    row_kind: str,
+    out_dir: Path,
+    file_prefix: str,
+    title_prefix: str,
+) -> list[str]:
+    """The standalone average-rank + relative-AUC ("relative ranking") PDFs across ``rows``."""
+    paths: list[str] = []
+    metrics_present = _metrics_present_in_rows(rows)
+
+    avg_rank_row = ranking.average_ranks_over_rows(rows, list(METHODS), _AXIS)
+    avg_rank_title = f"{title_prefix} -- average rank across {len(rows)} {row_kind}"
+    avg_rank_path = out_dir / f"{file_prefix}_avg_rank_vs_evaluations.pdf"
+    ok = _plot_avg_rank_figure(
+        avg_rank_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
+        avg_rank_title, avg_rank_path,
+    )
+    if ok is not None:
+        paths.append(str(ok))
+
+    relative_auc_row = ranking.relative_auc_ratios_over_rows(rows, list(METHODS), _AXIS)
+    relative_auc_title = f"{title_prefix} -- relative AUC across {len(rows)} {row_kind}"
+    relative_auc_path = out_dir / f"{file_prefix}_relative_auc_vs_evaluations.pdf"
+    ok = _plot_relative_auc_figure(
+        relative_auc_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
+        relative_auc_title, relative_auc_path,
+    )
+    if ok is not None:
+        paths.append(str(ok))
+
+    return paths
+
+
 def summarize_plots(
     input_dir: str | Path,
     problems: list[str],
     output_dir: str | Path,
 ) -> tuple[list[str], dict[str, list], dict[str, CurveCache]]:
-    """Produce the grid PDFs (see module docstring). Returns ``(paths, runs_by_problem, caches_by_problem)``.
+    """Produce the PDFs (see module docstring). Returns ``(paths, runs_by_problem, caches_by_problem)``.
 
     The latter two are returned so the stats step below can reuse the same
     discovered runs / precomputed metric curves instead of re-reading logs.
@@ -105,6 +185,7 @@ def summarize_plots(
     caches_by_problem = {p: _precompute(runs) for p, runs in runs_by_problem.items() if runs}
 
     paths: list[str] = []
+    title_prefix = "itcas_ndig vs itcas_seq_ndig vs cr_ndig"
 
     standard_problems = [p for p in problems if p != _SPACECRAFT_PROBLEM]
     standard_runs = {p: runs_by_problem.get(p, []) for p in standard_problems}
@@ -112,28 +193,30 @@ def summarize_plots(
         rows = _rows_by_problem(standard_problems, standard_runs, caches_by_problem, diff)
         if not rows:
             continue
-        title = (
-            f"itcas_ndig vs itcas_seq_ndig vs cr_ndig ({diff}) "
-            "vs total individual evaluations"
+        paths.extend(
+            _emit_row_pdfs(rows, diff, out_dir, f"ndig_comparison_{diff}", title_prefix)
         )
-        out_path = out_dir / f"ndig_comparison_{diff}_vs_evaluations.pdf"
-        ok = plot_group_grid(list(METHODS), _METHOD_STYLES, rows, title, out_path)
-        if ok is not None:
-            paths.append(str(ok))
+        paths.extend(
+            _emit_rank_summary_pdfs(
+                rows, f"problems ({diff})", out_dir, f"ndig_comparison_{diff}", title_prefix
+            )
+        )
 
     if _SPACECRAFT_PROBLEM in problems:
         sc_runs = runs_by_problem.get(_SPACECRAFT_PROBLEM, [])
         sc_cache = caches_by_problem.get(_SPACECRAFT_PROBLEM, {})
         rows = _rows_by_difficulty(sc_runs, sc_cache)
         if rows:
-            title = (
-                "itcas_ndig vs itcas_seq_ndig vs cr_ndig "
-                f"({_SPACECRAFT_PROBLEM}, rows = difficulty level) vs total individual evaluations"
+            file_prefix = f"ndig_comparison_{_SPACECRAFT_PROBLEM}"
+            paths.extend(
+                _emit_row_pdfs(rows, _SPACECRAFT_PROBLEM, out_dir, file_prefix, title_prefix)
             )
-            out_path = out_dir / f"ndig_comparison_{_SPACECRAFT_PROBLEM}_vs_evaluations.pdf"
-            ok = plot_group_grid(list(METHODS), _METHOD_STYLES, rows, title, out_path)
-            if ok is not None:
-                paths.append(str(ok))
+            paths.extend(
+                _emit_rank_summary_pdfs(
+                    rows, f"difficulty levels ({_SPACECRAFT_PROBLEM})", out_dir,
+                    file_prefix, title_prefix,
+                )
+            )
 
     return paths, runs_by_problem, caches_by_problem
 

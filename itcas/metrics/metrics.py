@@ -121,23 +121,51 @@ def feasible_convex_hull_volume(
     return float(hull.volume)
 
 
+def transform_feasible_for_archive(
+    feasible_Y: torch.Tensor, thresholds: torch.Tensor
+) -> torch.Tensor:
+    """``y' = log1p(y - tau)`` per `contexts/metrics.md` §4.
+
+    This is the *same* transform ``itcas.reporting.tune_eps_archive`` applies
+    (offline) to the pooled feasible set before calibrating ``eps`` as a
+    percentile of pairwise distances. Any runtime consumer of that calibrated
+    ``eps`` must build its ε-net in this same transformed space, or the
+    threshold is compared against the wrong scale (see git history for the
+    bug this fixes: raw-space archives silently collapsed onto the
+    Number-of-Positives count whenever ``y - tau`` was large).
+
+    ``feasible_Y`` is assumed to already be filtered to strictly feasible rows
+    (``is_feasible(feasible_Y, thresholds)`` all True), so ``y - tau >= 0``
+    elementwise and ``log1p`` is always defined.
+    """
+    return torch.log1p(feasible_Y.detach().double() - thresholds.detach().double())
+
+
 def epsilon_archive_size(
     feasible_Y: torch.Tensor,
     *,
+    thresholds: torch.Tensor,
     eps: float = 0.05,
 ) -> int:
     """ε-Archive Size: cardinality of a greedy ε-net over feasible objective vectors.
 
+    Per `contexts/metrics.md` §4, the ε-net is built in *log-transformed*
+    space: ``y' = log1p(y - thresholds)``, exactly mirroring the offline
+    calibration in ``itcas.reporting.tune_eps_archive`` that produced ``eps``
+    in the first place (a raw-space ``eps`` comparison here would silently
+    collapse this metric onto Number-of-Positives whenever the feasible
+    margin ``y - thresholds`` is large).
+
     Objective vectors are processed in order. A point is added to the archive
-    only if it lies at least ``eps`` away (Euclidean) from every existing archive
-    member. Returns the final archive size — a strictly monotone, boundary-free
-    micro-diversity count.
+    only if its transform lies at least ``eps`` away (Euclidean) from every
+    existing archive member's transform. Returns the final archive size — a
+    strictly monotone, boundary-free micro-diversity count.
     """
     if feasible_Y.numel() == 0:
         return 0
-    Y = feasible_Y.detach().double()
-    if Y.ndim != 2:
-        raise ValueError(f"feasible_Y must be 2D, got shape {tuple(Y.shape)}")
+    if feasible_Y.ndim != 2:
+        raise ValueError(f"feasible_Y must be 2D, got shape {tuple(feasible_Y.shape)}")
+    Y = transform_feasible_for_archive(feasible_Y, thresholds)
     N = int(Y.shape[0])
     archive: list[torch.Tensor] = []
     for k in range(N):

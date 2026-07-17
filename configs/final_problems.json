@@ -5,18 +5,18 @@
         "dtlz1_12d",
         "dtlz2_6d",
         "dtlz3_8d",
-        "spacecraft_formation_flying_a1"
-    ],
-    "temporary": [
         "ellipsoid_rastrigin_20d",
         "griewank_16d",
+        "spacecraft_formation_flying_a1",
         "heterogeneous_quadrants_6d",
         "levy_16d",
         "multimodal_trap_20d",
-        "rastrigin_griewank_sphere_20d",
         "schwefel_styblinski_sphere_20d",
         "styblinski_tang_6d",
+        "rastrigin_griewank_sphere_20d",
         "styblinski_tang_levy_10d",
         "zdt3_6d"
+    ],
+    "temporary": [
     ]
 }

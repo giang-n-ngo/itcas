@@ -30,6 +30,7 @@ from ..metrics import (
     feasible_context_fill_distance,
     feasible_convex_hull_volume,
     is_feasible,
+    transform_feasible_for_archive,
 )
 from ..metrics.reference import ReferenceData, build_reference_data
 from ..pipeline.problems import REGISTRY as PROBLEM_REGISTRY
@@ -210,9 +211,12 @@ def _eps_from_experiments(problem: str, threshold_pct: Optional[str]) -> Optiona
 def epsilon_archive_size_curve(run: RunSeries) -> list[float]:
     """ε-Archive Size curve.
 
-    Feasible objective vectors are processed in chronological order. A point is
-    admitted to the archive only if it is at least ``eps`` away (Euclidean) from
-    every existing archive member, where ``eps`` is read from
+    Feasible objective vectors are log-transformed (``y' = log1p(y -
+    thresholds)``, matching ``itcas.reporting.tune_eps_archive``'s offline
+    calibration space — see `contexts/metrics.md` §4) and processed in
+    chronological order. A point is admitted to the archive only if its
+    transform is at least ``eps`` away (Euclidean) from every existing archive
+    member's transform, where ``eps`` is read from
     ``run.config["eps_archive"]`` (default 0.05). The curve is the archive size
     at each algorithmic step.
 
@@ -236,10 +240,10 @@ def epsilon_archive_size_curve(run: RunSeries) -> list[float]:
 
     feas_indices_t = feas_mask_all.nonzero(as_tuple=True)[0]  # sorted
     feas_idx_list = feas_indices_t.tolist()
-    disc_all = Y_final[feas_indices_t].detach().double()
+    disc_all = transform_feasible_for_archive(Y_final[feas_indices_t], run.thresholds)
     N_feas = int(disc_all.shape[0])
 
-    # Build greedy ε-archive in chronological order.
+    # Build greedy ε-archive in chronological order (in transformed space).
     # archive_size_by_k[k] = archive size after the k-th feasible point is seen.
     archive_pts: list[torch.Tensor] = []
     archive_size_by_k: list[int] = [0]  # index 0 = zero feasible points seen

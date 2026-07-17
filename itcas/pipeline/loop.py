@@ -742,6 +742,7 @@ def run_experiment(problem: Problem, cfg: ExperimentConfig) -> dict:
     summary["feasible_convex_hull_volume"] = feasible_convex_hull_volume(disc_Y)
     summary["epsilon_archive_size"] = epsilon_archive_size(
         disc_Y,
+        thresholds=h,
         eps=cfg.eps_archive if cfg.eps_archive is not None else problem.eps_archive,
     )
 

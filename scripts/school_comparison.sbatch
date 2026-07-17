@@ -4,7 +4,7 @@
 #SBATCH --qos=cpu
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=8G
+#SBATCH --mem=32G
 #SBATCH --time=00:30:00
 #SBATCH --output=slurm_logs/itcas_school_comparison-%j.out
 #SBATCH --error=slurm_logs/itcas_school_comparison-%j.err
@@ -15,18 +15,20 @@
 # dependency), structurally like summarize_aggregate.sbatch.
 #
 # Runs itcas/reporting/school_comparison.py, which internally reads run logs
-# for 5 fixed problems (all_valley_8d, alpine_12d, dtlz1_12d, dtlz2_6d,
-# dtlz3_8d) at one fixed difficulty, for a small fixed set of methods
-# (straddle_then_sample, bes_then_sample, cas_eci/cas_eci_batch,
-# moc_cas_hard/moc_cas_hard_batch) and produces exactly 4 PDFs:
-#   two_schools_sequential_vs_evaluations.pdf
-#   two_schools_sequential_vs_steps.pdf
-#   two_schools_batch_vs_evaluations.pdf
-#   two_schools_batch_vs_steps.pdf
+# for all 16 problems in configs/final_problems.json at one fixed difficulty,
+# across both LSE bases (straddle_then_sample and bes_then_sample) and their
+# associated methods, sequential-only (batch generation was removed), and
+# produces exactly 3 PDFs:
+#   two_schools_sequential_lse10_vs_evaluations.pdf
+#   two_schools_sequential_lse25_vs_evaluations.pdf
+#   two_schools_sequential_lse50_vs_evaluations.pdf
 #
-# Measured locally on real results/sweep data: 2m18s wall-clock, 4m48s user
-# CPU (modest multi-threaded BLAS use via torch/numpy), ~2.5GB peak RSS.
-# CPU-only, no GPU required.
+# Measured locally on real results/sweep data (16 problems x 2 LSE bases):
+# 6m35s wall-clock, 7m56s user CPU (~124% CPU, modest multi-threaded BLAS use
+# via torch/numpy), ~16.0GB peak RSS (_collect_setting precomputes metric
+# curves for every problem and the union of every LSE-proportion's methods
+# before any PDF is written, so peak RSS scales with problems x methods x
+# seeds). CPU-only, no GPU required.
 #
 # Environment overrides (export before sbatch, or via --export):
 #   CONDA_ENV=itcas                             # conda env to activate
@@ -34,8 +36,9 @@
 #   INPUT_DIR=results/sweep                     # run-log tree to read
 #   CONFIG=configs/two_schools_of_thought.json  # method/problem/difficulty config
 #   OUTPUT_DIR=<unset>                          # where PDFs are written;
-#                                                # if unset, writes into INPUT_DIR
-#                                                # (matches the script's own default)
+#                                                # if unset, the Python module's
+#                                                # own default (results/school_comparison)
+#                                                # is used, NOT INPUT_DIR
 #
 # Submit:
 #   sbatch scripts/school_comparison.sbatch
@@ -64,7 +67,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-}"
 
 echo "===================================================================="
 echo "ITCAS school comparison | job ${SLURM_JOB_ID:-local} | host=$(hostname)"
-echo "input_dir=${INPUT_DIR} config=${CONFIG} output_dir=${OUTPUT_DIR:-<input_dir>}"
+echo "input_dir=${INPUT_DIR} config=${CONFIG} output_dir=${OUTPUT_DIR:-<script default: results/school_comparison>}"
 echo "start=$(date '+%Y-%m-%d %H:%M:%S')"
 echo "===================================================================="
 
@@ -99,6 +102,6 @@ RC=$?
 
 echo "===================================================================="
 echo "[school_comparison] finished rc=${RC} at $(date '+%Y-%m-%d %H:%M:%S')"
-echo "[school_comparison] outputs written under: ${OUTPUT_DIR:-${INPUT_DIR}}"
+echo "[school_comparison] outputs written under: ${OUTPUT_DIR:-results/school_comparison}"
 echo "===================================================================="
 exit "${RC}"

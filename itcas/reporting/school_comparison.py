@@ -53,6 +53,11 @@ from .summary import (
 )
 from .visualize import _discover_runs
 
+# Sequential-only for now (see _AXIS_BY_SETTING below) -- PDFs are written
+# here rather than into --input-dir, mirroring batch_vs_sequential.py's and
+# lse_ratio_comparison.py's own dedicated results/ subfolders.
+_DEFAULT_OUTPUT_DIR = "results/school_comparison"
+
 
 def _difficulty_label(threshold_pct: float) -> str:
     """Format a threshold fraction exactly like ``summary._difficulty_of``.
@@ -114,6 +119,105 @@ def _min_med_max(
             med.append(median(finite))
             hi.append(max(finite))
     return lo, med, hi
+
+
+# ---------------------------------------------------------------------------
+# Style scheme: color = school (LSE-then-sample vs CAS), marker = method
+# within a school (see module docstring's "orthogonal color/style axis" note
+# and the analogous schemes in ``lse_ratio_comparison`` (color=ratio,
+# linestyle=base) / ``batch_vs_sequential`` (color=family, linestyle=variant)
+# -- here the two axes are color=school and marker=method-within-school,
+# since curves are still continuous lines (not scatter), so ``markevery`` is
+# used below to keep markers legible instead of stamping one per data point.
+#
+# LSE-then-sample bases get cool hues, CAS methods get warm hues (tab10), so
+# "cool = staged LSE-then-Stage-2, warm = pure CAS acquisition" reads
+# consistently across every panel of every figure this module writes. Each
+# base additionally gets one fixed marker, independent of color, so two
+# methods sharing a school (e.g. straddle_then_sample vs bes_then_sample, or
+# cas_eci vs moc_cas_hard) stay visually distinct even where their curves
+# overlap.
+#
+# Both tables are keyed by *base* method name: for LSE-then-sample that is
+# the raw ``methods_cfg["lse"]`` entry (before the ``_lseNN``/``_batch``
+# suffixes ``_methods_for_proportion``/``_method_style_map`` append); for CAS
+# it is the entry with any trailing ``_batch`` stripped (so ``cas_eci`` and
+# ``cas_eci_batch`` share one color/marker). Any base not covered by these
+# fixed tables falls back to the next unused color/marker in its school's
+# pool, assigned deterministically in the order that base is encountered
+# while building the style map (see ``_method_style_map``) -- so an unknown
+# base's color/marker never depends on dict/config iteration order beyond
+# that, and known bases (straddle/bes/eci/moc_cas_hard) never shift.
+_LSE_SCHOOL_COLORS: dict[str, str] = {
+    "straddle_then_sample": "#1f77b4",  # tab10 blue
+    "bes_then_sample": "#17becf",  # tab10 cyan
+}
+_CAS_SCHOOL_COLORS: dict[str, str] = {
+    "cas_eci": "#ff7f0e",  # tab10 orange
+    "moc_cas_hard": "#d62728",  # tab10 red
+}
+# Fallback pools for bases not in the fixed tables above (kept within each
+# school's warm/cool family so an unrecognized base still visually reads as
+# "LSE-then-sample" or "CAS").
+_LSE_COLOR_FALLBACK: tuple[str, ...] = ("#1f77b4", "#17becf", "#9467bd", "#7f7f7f")
+_CAS_COLOR_FALLBACK: tuple[str, ...] = ("#ff7f0e", "#d62728", "#bcbd22", "#8c564b")
+
+_KNOWN_MARKERS: dict[str, str] = {
+    "straddle_then_sample": "o",
+    "bes_then_sample": "s",
+    "cas_eci": "^",
+    "moc_cas_hard": "D",
+}
+_MARKER_FALLBACK: tuple[str, ...] = ("v", "P", "X", "*", "h", "p")
+
+
+def _strip_batch_suffix(name: str) -> str:
+    """Return ``name`` with a trailing ``"_batch"`` removed, if present."""
+    return name[: -len("_batch")] if name.endswith("_batch") else name
+
+
+def _method_style_map(methods_cfg: dict, proportion: int, setting: str) -> dict[str, dict]:
+    """Return ``{concrete_method_name: {"color": ..., "marker": ...}}``.
+
+    Mirrors :func:`_methods_for_proportion`'s construction of concrete method
+    names (LSE bases get ``_lseNN`` + optional ``_batch`` appended; CAS
+    methods are used as-is), but additionally resolves each concrete method's
+    style from its *base* identifier via the color/marker tables above (see
+    their comment for the "school = color, method = marker" scheme and the
+    deterministic fallback for unknown bases).
+    """
+    suffix = "_batch" if setting == "batch" else ""
+    styles: dict[str, dict] = {}
+
+    lse_fallback_idx = 0
+    for base in methods_cfg["lse"]:
+        if base in _LSE_SCHOOL_COLORS:
+            color = _LSE_SCHOOL_COLORS[base]
+        else:
+            color = _LSE_COLOR_FALLBACK[lse_fallback_idx % len(_LSE_COLOR_FALLBACK)]
+            lse_fallback_idx += 1
+        method = f"{base}_lse{proportion}{suffix}"
+        styles[method] = {"color": color, "marker": _KNOWN_MARKERS.get(base)}
+
+    cas_fallback_idx = 0
+    for method in methods_cfg["cas"]:
+        base = _strip_batch_suffix(method)
+        if base in _CAS_SCHOOL_COLORS:
+            color = _CAS_SCHOOL_COLORS[base]
+        else:
+            color = _CAS_COLOR_FALLBACK[cas_fallback_idx % len(_CAS_COLOR_FALLBACK)]
+            cas_fallback_idx += 1
+        styles[method] = {"color": color, "marker": _KNOWN_MARKERS.get(base)}
+
+    # Resolve markers for any base absent from _KNOWN_MARKERS, deterministically,
+    # in the order each such method was first inserted above (dicts preserve
+    # insertion order).
+    marker_fallback_idx = 0
+    for style in styles.values():
+        if style["marker"] is None:
+            style["marker"] = _MARKER_FALLBACK[marker_fallback_idx % len(_MARKER_FALLBACK)]
+            marker_fallback_idx += 1
+    return styles
 
 
 def _methods_for_proportion(methods_cfg: dict, proportion: int, setting: str) -> list[str]:
@@ -238,7 +342,7 @@ def plot_school_comparison(
 
     if precomputed is None:
         precomputed = _collect_setting(input_dir, config_path, setting)
-    problems, diff_label, methods_cfg, _proportions, all_runs_by_problem, all_caches = precomputed
+    problems, _diff_label, methods_cfg, _proportions, all_runs_by_problem, all_caches = precomputed
     methods: list[str] = _methods_for_proportion(methods_cfg, proportion, setting)
     runs_by_problem, caches = _filter_precomputed_to_methods(
         problems, all_runs_by_problem, all_caches, methods
@@ -263,19 +367,13 @@ def plot_school_comparison(
 
     n_rows = len(problems_present)
     n_cols = len(metrics_present) + 2  # + raw product + product rank
-    colors = plt.get_cmap("tab10").colors
-    method_colors = {m: colors[i % len(colors)] for i, m in enumerate(methods)}
+    method_styles = _method_style_map(methods_cfg, proportion, setting)
 
     fig_w = max(4.0 * n_cols, 12.0)
     fig_h = max(2.5 * n_rows + 1.0, 5.0)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
 
     axis_label = "Total individual evaluations" if axis == "evals" else "Algorithmic step"
-    fig.suptitle(
-        f"{setting.capitalize()} ({proportion}% LSE): LSE-then-sample vs CAS ({diff_label}) "
-        f"vs {axis_label.lower()}",
-        fontsize=11,
-    )
 
     for r_idx, problem in enumerate(problems_present):
         cache = caches[problem]
@@ -307,8 +405,12 @@ def plot_school_comparison(
                 lo, med, hi = _min_med_max(curves)
                 n = min(len(med), len(x_ref))
                 x_plot = x_ref[:n]
-                color = method_colors[method]
-                ax.plot(x_plot, med[:n], color=color, linewidth=1.5, label=method)
+                style = method_styles[method]
+                color = style["color"]
+                ax.plot(
+                    x_plot, med[:n], color=color, marker=style["marker"],
+                    markevery=max(1, n // 8), linewidth=1.5, label=method,
+                )
                 if len(curves) > 1:
                     ax.fill_between(x_plot, lo[:n], hi[:n], color=color, alpha=0.15)
                 plotted = True
@@ -336,10 +438,14 @@ def plot_school_comparison(
         ax.tick_params(axis="both", labelsize=7)
         plotted = False
         for method in sorted(method_med.keys()):
-            color = method_colors[method]
+            style = method_styles[method]
+            color = style["color"]
             x_plot = method_x[method]
-            ax.plot(x_plot, method_med[method], color=color,
-                    linewidth=1.5, label=method)
+            n = len(method_med[method])
+            ax.plot(
+                x_plot, method_med[method], color=color, marker=style["marker"],
+                markevery=max(1, n // 8), linewidth=1.5, label=method,
+            )
             if len(method_runs.get(method, [])) > 1:
                 ax.fill_between(x_plot, method_lo[method], method_hi[method],
                                 color=color, alpha=0.15)
@@ -360,9 +466,13 @@ def plot_school_comparison(
         plotted = False
         if method_med:
             grid, rank_curves = _rank_curves_on_union_grid(method_x, method_med)
+            n = len(grid)
             for method in sorted(method_med.keys()):
-                ax.plot(grid, rank_curves[method], color=method_colors[method],
-                        linewidth=1.5, label=method)
+                style = method_styles[method]
+                ax.plot(
+                    grid, rank_curves[method], color=style["color"], marker=style["marker"],
+                    markevery=max(1, n // 8), linewidth=1.5, label=method,
+                )
                 plotted = True
             n_ranked = len(method_med)
             ax.set_ylim(n_ranked + 0.5, 0.5)
@@ -387,9 +497,9 @@ def plot_school_comparison(
             loc="lower center", ncol=min(len(methods), 6),
             fontsize=8, bbox_to_anchor=(0.5, 0.0),
         )
-        fig.tight_layout(rect=(0, 0.06, 1, 0.97))
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
     else:
-        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        fig.tight_layout()
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -399,14 +509,13 @@ def plot_school_comparison(
 
 
 _AXIS_BY_SETTING: dict[str, tuple[str, str]] = {
-    # sequential runs vary in step count per method (LSE-then-sample burns a
-    # fixed Stage-1 budget CAS doesn't), so only the evaluations axis lines
-    # methods up on a comparable x-value; batch runs advance one step per
-    # batch regardless of batch_size, so only the step axis is meaningful
-    # there (evaluations would just rescale each method's x-axis by its own
-    # batch size).
+    # Sequential only, by request -- batch is intentionally not generated
+    # right now (drop this comment and re-add a "batch": ("steps", "vs_steps")
+    # entry if it's needed again; sequential runs vary in step count per
+    # method since LSE-then-sample burns a fixed Stage-1 budget CAS doesn't,
+    # so the evaluations axis is what lines methods up on a comparable
+    # x-value here).
     "sequential": ("evals", "vs_evaluations"),
-    "batch": ("steps", "vs_steps"),
 }
 
 
@@ -415,14 +524,14 @@ def summarize_school_comparison(
     config_path: str | Path = "configs/two_schools_of_thought.json",
     output_dir: str | Path | None = None,
 ) -> list[str]:
-    """Produce the sequential (vs evaluations) and batch (vs steps) figures.
+    """Produce the sequential (vs evaluations) figures (see ``_AXIS_BY_SETTING``).
 
     One figure is generated per Stage-1/LSE proportion listed in the config's
     ``lse_proportions`` (e.g. ``[10, 25, 50]``), so the total PDF count is
     ``len(settings) * len(lse_proportions)``.
     """
     input_path = Path(input_dir)
-    out_dir = Path(output_dir) if output_dir is not None else input_path
+    out_dir = Path(output_dir) if output_dir is not None else Path(_DEFAULT_OUTPUT_DIR)
 
     paths: list[str] = []
     for setting, (axis, suffix) in _AXIS_BY_SETTING.items():
@@ -450,7 +559,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--config", type=str, default="configs/two_schools_of_thought.json",
         help="Path to the two-schools config (problems, difficulty, method groups).",
     )
-    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument(
+        "--output-dir", type=str, default=_DEFAULT_OUTPUT_DIR,
+        help=f"Directory to write grid PDFs to (default: {_DEFAULT_OUTPUT_DIR}).",
+    )
     args = parser.parse_args(argv)
 
     paths = summarize_school_comparison(

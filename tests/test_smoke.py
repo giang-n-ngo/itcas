@@ -103,14 +103,58 @@ def test_objective_diversity_metrics():
     assert math.isclose(fchv, 25.0, rel_tol=1e-6)
     assert feasible_convex_hull_volume(Y[:2]) == 0.0
 
-    # ε-Archive Size: spread points (raw dist=sqrt(125) >> eps) → 2; duplicates → 1.
+    # ε-Archive Size operates on y' = log1p(y - thresholds) (contexts/metrics.md
+    # §4), not raw y. With thresholds=0, log1p(y) still separates these two
+    # points by far more than eps=0.05, so this still nets 2 vs. 1.
+    tau0 = torch.zeros(2, dtype=torch.double)
     spread = torch.tensor([[0.0, 0.0], [10.0, 5.0]], dtype=torch.double)
     duplicate = torch.tensor([[0.0, 0.0], [0.0, 0.0]], dtype=torch.double)
-    assert epsilon_archive_size(spread, eps=0.05) == 2
-    assert epsilon_archive_size(duplicate, eps=0.05) == 1
+    assert epsilon_archive_size(spread, thresholds=tau0, eps=0.05) == 2
+    assert epsilon_archive_size(duplicate, thresholds=tau0, eps=0.05) == 1
     # Spread has strictly more diversity than duplicate set.
-    assert epsilon_archive_size(spread) > epsilon_archive_size(duplicate)
-    assert epsilon_archive_size(Y[:0]) == 0
+    assert epsilon_archive_size(spread, thresholds=tau0) > epsilon_archive_size(
+        duplicate, thresholds=tau0
+    )
+    assert epsilon_archive_size(Y[:0], thresholds=tau0) == 0
+
+
+def test_epsilon_archive_size_uses_transformed_not_raw_distance():
+    """Regression test for the unit-consistency bug: skipping the log1p(y -
+    thresholds) transform makes eps-Archive Size collapse onto Number of
+    Positives whenever the feasible margin (y - tau) is large, because a raw
+    Euclidean distance that looks large is actually a near-duplicate once
+    compressed by log1p.
+
+    tau = [100, 100]; p1 = [200, 100], p2 = [200.5, 100].
+    Raw distance ||p1 - p2|| = 0.5, comfortably >= eps=0.05 -- a raw-space
+    archive would (wrongly) admit both as distinct.
+    Transformed: y'_1 = [log1p(100), log1p(0)] ~= [4.6151, 0.0],
+                 y'_2 = [log1p(100.5), log1p(0)] ~= [4.6201, 0.0].
+    Transformed distance ~= 0.005 < eps=0.05 -- the correct (spec-following)
+    archive collapses these to a single entry.
+    """
+    import math
+
+    import torch
+    from itcas.metrics import epsilon_archive_size, transform_feasible_for_archive
+
+    tau = torch.tensor([100.0, 100.0], dtype=torch.double)
+    p1 = torch.tensor([200.0, 100.0], dtype=torch.double)
+    p2 = torch.tensor([200.5, 100.0], dtype=torch.double)
+    Y = torch.stack([p1, p2])
+
+    raw_dist = float(torch.linalg.norm(p1 - p2).item())
+    assert raw_dist >= 0.05, "fixture must exercise the large-raw-distance regime"
+
+    transformed = transform_feasible_for_archive(Y, tau)
+    transformed_dist = float(torch.linalg.norm(transformed[0] - transformed[1]).item())
+    assert transformed_dist < 0.05, "log1p(y - tau) must compress this pair below eps"
+    assert math.isclose(transformed_dist, 0.005, abs_tol=5e-4)
+
+    # The production function must follow the transformed distance (archive
+    # size 1, i.e. p2 recognised as a near-duplicate of p1), not the raw one
+    # (which would wrongly report 2).
+    assert epsilon_archive_size(Y, thresholds=tau, eps=0.05) == 1
 
 
 def test_tune_eps_archive_percentile_hand_checked():
@@ -1548,6 +1592,138 @@ def test_pending_seeds_skips_completed():
         assert 1 in pending_seeds(range(1, 11), out, "demo")
 
 
+def test_synthetic_comparison_split_pipeline_matches_monolithic():
+    """The per-problem+aggregate synthetic-comparison split must not change any numbers.
+
+    Builds tiny fake run data for two "synthetic" problems (every method in
+    ``SYNTHETIC_METHODS``, a handful of seeds, one difficulty level) and
+    checks that:
+
+    1. :func:`summarize_synthetic_comparison_problem` (called once per
+       problem) + :func:`summarize_synthetic_comparison_aggregate` produce a
+       byte-identical ``synthetic_comparison_stats_report.json`` to the
+       monolithic :func:`summarize_synthetic_comparison`.
+    2. The combined avg-rank / relative-AUC dicts (:func:`_combine_synthetic_summaries`)
+       are numerically identical whether fed in-memory per-problem summaries
+       (the monolithic path) or summaries reloaded from the intermediate
+       JSON files the split per-problem jobs write to disk.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from itcas.reporting import summary as smry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        problems = ["fake_problem_a", "fake_problem_b"]
+        diff = "p0_05"
+
+        def write_run(problem, method, seed, bias):
+            run_dir = root / problem / diff / method
+            run_dir.mkdir(parents=True, exist_ok=True)
+            name = f"{problem}__{method}__{diff}_seed{seed}"
+            # A little per-(method, seed) variation so ranks/ratios aren't
+            # all tied -- exact values don't matter, only that both
+            # pipelines compute the *same* values from the same inputs.
+            feasible = (seed + bias) % 3 != 0
+            y0 = -1.0 - 0.1 * bias - 0.01 * seed
+            (run_dir / f"{name}.jsonl").write_text(
+                json.dumps({
+                    "step": 1, "n_eval_total": 3, "n_eval_this_iter": 1,
+                    "feasible": [feasible],
+                    "x": [[0.1] * 6],
+                    "y": [[y0, y0 - 0.5] if feasible else [-100.0, -1.0]],
+                }) + "\n"
+            )
+            (run_dir / f"{name}.summary.json").write_text(json.dumps({
+                "config": {"method": method, "n_init": 2, "seed": seed,
+                           "extra": {"threshold_pct": 0.05}},
+                "problem": problem,
+                "n_init": 2,
+                "thresholds": [-30.0, -30.0],
+                "context_dims": [3, 4, 5],
+                "init_X": [[0.0] * 6, [0.1] * 6],
+                "init_Y": [[-1.0, -1.0], [-2.0, -2.0]],
+                "init_feasible": [True, True],
+            }))
+
+        for problem in problems:
+            for m_idx, method in enumerate(smry.SYNTHETIC_METHODS):
+                for seed in range(4):
+                    write_run(problem, method, seed, bias=m_idx)
+
+        problems_config = root / "problems_config.json"
+        problems_config.write_text(json.dumps({"problems": problems, "temporary": []}))
+
+        mono_out = root / "mono_out"
+        split_out = root / "split_out"
+        metrics_dir = root / "split_metrics"
+
+        mono_paths = smry.summarize_synthetic_comparison(
+            root, problems_config=problems_config, output_dir=mono_out, alpha=0.05,
+        )
+        assert mono_paths
+
+        split_paths = []
+        for problem in problems:
+            split_paths.extend(smry.summarize_synthetic_comparison_problem(
+                root, problem, problems_config=problems_config,
+                output_dir=split_out, save_metrics_dir=metrics_dir, alpha=0.05,
+            ))
+        split_paths.extend(smry.summarize_synthetic_comparison_aggregate(
+            metrics_dir, output_dir=split_out, alpha=0.05,
+        ))
+        assert split_paths
+
+        mono_stats = (mono_out / diff / "synthetic_comparison_stats_report.json").read_text()
+        split_stats = (split_out / diff / "synthetic_comparison_stats_report.json").read_text()
+        assert json.loads(mono_stats) == json.loads(split_stats)
+
+        # Per-problem PDF must exist under both pipelines with the same name.
+        for problem in problems:
+            assert (mono_out / diff / f"synthetic_comparison_{problem}_vs_evaluations.pdf").exists()
+            assert (split_out / diff / f"synthetic_comparison_{problem}_vs_evaluations.pdf").exists()
+        assert (mono_out / diff / "synthetic_comparison_avg_rank_vs_evaluations.pdf").exists()
+        assert (split_out / diff / "synthetic_comparison_avg_rank_vs_evaluations.pdf").exists()
+        assert (mono_out / diff / "synthetic_comparison_relative_auc_vs_evaluations.pdf").exists()
+        assert (split_out / diff / "synthetic_comparison_relative_auc_vs_evaluations.pdf").exists()
+
+        # Recompute the combined avg-rank/relative-AUC dicts two ways and
+        # confirm they agree exactly: (a) in-memory per-problem summaries
+        # (what the monolithic function uses internally) vs (b) summaries
+        # reloaded from the on-disk JSON the split per-problem jobs wrote.
+        from itcas.reporting.batch_vs_sequential import _collect_family_runs
+
+        runs_by_problem = _collect_family_runs(root, problems, list(smry.SYNTHETIC_METHODS))
+        caches_by_problem = {p: smry._precompute(rs) for p, rs in runs_by_problem.items() if rs}
+        summaries_in_memory = {}
+        for problem in problems:
+            rs = runs_by_problem.get(problem, [])
+            if not rs:
+                continue
+            summary, _ = smry._synthetic_problem_report(
+                problem, rs, caches_by_problem.get(problem, {}), out_dir=None,
+            )
+            summaries_in_memory[problem] = summary
+        combined_in_memory = smry._combine_synthetic_summaries(summaries_in_memory)
+
+        summaries_from_disk = {}
+        for f in sorted(metrics_dir.glob("*_synthetic_metrics.json")):
+            problem, diffs = smry.load_synthetic_problem_metrics(f)
+            summaries_from_disk[problem] = diffs
+        combined_from_disk = smry._combine_synthetic_summaries(summaries_from_disk)
+
+        assert set(combined_in_memory) == set(combined_from_disk)
+        for d in combined_in_memory:
+            a, b = combined_in_memory[d], combined_from_disk[d]
+            assert a["n_rows"] == b["n_rows"]
+            assert [s.key for s in a["metrics_present"]] == [s.key for s in b["metrics_present"]]
+            assert a["avg_rank"] == b["avg_rank"]
+            assert a["relative_auc"] == b["relative_auc"]
+            assert a["auc_by_problem"] == b["auc_by_problem"]
+
+
 def test_run_lock_prevents_concurrent_runs(tmp_path=None):
     """A second RunLock on the same (out_dir, run_name) must fail fast."""
     import tempfile
@@ -1571,6 +1747,8 @@ if __name__ == "__main__":
     test_qd_dpp_joint_kernel_reduces_to_objective_without_ctx()
     test_metrics_basic()
     test_fill_distance_metrics()
+    test_objective_diversity_metrics()
+    test_epsilon_archive_size_uses_transformed_not_raw_distance()
     test_tune_eps_archive_percentile_hand_checked()
     test_tune_eps_archive_caps_pdist_via_subsampling()
     test_tune_eps_archive_pools_log_transforms_and_filters_infeasible()
@@ -1596,6 +1774,8 @@ if __name__ == "__main__":
     test_threshold_save_load_roundtrip()
     test_resolve_device_specs()
     test_sample_uniform_device_and_reproducibility()
+    test_synthetic_comparison_split_pipeline_matches_monolithic()
+    test_run_lock_prevents_concurrent_runs()
     test_evaluate_true_matches_input_device_and_dtype()
     test_parse_seed_spec_ranges_and_singletons()
     test_run_name_for_seed_template_and_suffix()

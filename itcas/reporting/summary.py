@@ -39,6 +39,9 @@ from .metrics import REGISTRY as METRIC_REGISTRY, MetricSpec, RunSeries, build_r
 from .visualize import _discover_runs
 from .stats import (
     StatsReport,
+    _fmt,
+    _sig_marker,
+    report_to_json,
     run_stats,
     run_stats_per_variant,
     write_dominance_table,
@@ -478,10 +481,6 @@ def _plot_problem(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
 
     axis_label = "Total individual evaluations" if axis == "evals" else "Algorithmic step"
-    fig.suptitle(
-        f"{problem}: per-seed metric areas vs {axis_label.lower()}",
-        fontsize=11,
-    )
 
     for r_idx, diff in enumerate(difficulties):
         for c_idx, spec in enumerate(metrics_present):
@@ -572,7 +571,7 @@ def _plot_problem(
             ax.set_xlabel("product of areas", fontsize=8)
         ax.tick_params(labelleft=False)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
@@ -647,7 +646,6 @@ def _plot_problem_curves(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
 
     axis_label = "Total individual evaluations" if axis == "evals" else "Algorithmic step"
-    fig.suptitle(f"{problem}: metric curves vs {axis_label.lower()}", fontsize=11)
 
     for r_idx, diff in enumerate(difficulties):
         method_runs = by_diff_method.get(diff, {})
@@ -759,9 +757,9 @@ def _plot_problem_curves(
             loc="lower center", ncol=min(len(methods), 6),
             fontsize=8, bbox_to_anchor=(0.5, 0.0),
         )
-        fig.tight_layout(rect=(0, 0.06, 1, 0.97))
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
     else:
-        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        fig.tight_layout()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -807,10 +805,6 @@ def _plot_hypervolume_from_data(
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
 
     axis_label = "Total individual evaluations" if axis == "evals" else "Algorithmic step"
-    fig.suptitle(
-        f"Hypervolume (product of metric areas) — all problems vs {axis_label.lower()}",
-        fontsize=11,
-    )
 
     for c_idx, problem in enumerate(problems):
         hyper = hv_by_problem.get(problem, {})
@@ -856,7 +850,7 @@ def _plot_hypervolume_from_data(
             else:
                 ax.tick_params(labelleft=False)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
     plt.close(fig)
@@ -934,6 +928,751 @@ def _collect_hv_for_stats(
             # hyper: {diff: {method: [per-seed hv]}}
             out[problem][axis] = {d: dict(m) for d, m in hyper.items()}
     return out
+
+
+# ---------------------------------------------------------------------------
+# Synthetic-function comparison: ITCAS (batch) vs 5 baselines, one folder per
+# difficulty level.
+#
+# This is the "headline" comparison for the paper's synthetic suite: the
+# proposed method (``itcas_ndig`` -- full ITCAS, QD-DPP greedy batch
+# selection, quality=``ndig``) against Random, the two Family-C
+# "LSE-then-sample" baselines at a 10% Stage-1 split
+# (``straddle_then_sample_lse10``, ``bes_then_sample_lse10``, both forced
+# sequential), and the two CAS-family sequential acquisitions (``cas_eci``,
+# ``moc_cas_hard``). All five baselines are forced-sequential (one record per
+# individual evaluation); only ``itcas_ndig`` is batch, so -- exactly as in
+# ``ndig_comparison``/``ff_comparison`` -- **total individual evaluations**
+# (``RunSeries.x_evals``) is the only fair shared x-axis; there is no steps
+# variant here.
+#
+# "Synthetic" means every problem in ``configs/final_problems.json`` except
+# ``spacecraft_formation_flying_a1`` (the one problem backed by a real
+# Basilisk simulation rather than a closed-form objective). Every difficulty
+# level present on disk gets its own output subfolder (rows = problems,
+# columns = metric curves + raw product + product-rank, plus a bottom
+# average-rank row and a Friedman/Wilcoxon stats report) so a reader can open
+# exactly one difficulty's results without wading through the rest.
+#
+# The grid rendering (``plot_group_grid``) and per-row helpers
+# (``_collect_family_runs``, ``_difficulties_present``, ``_rows_by_problem``,
+# ``_collect_product_auc_for_stats``) already live in ``batch_vs_sequential``;
+# ``average_ranks_over_rows`` lives in ``ranking``. Both of those modules
+# import from *this* one at their own top level, so importing them back here
+# at module scope would be circular -- the imports below are deferred inside
+# the function body instead, which is safe because by the time it runs, every
+# module involved has already finished loading.
+# ---------------------------------------------------------------------------
+_DEFAULT_PROBLEMS_CONFIG = "configs/final_problems.json"
+_SPACECRAFT_PROBLEM = "spacecraft_formation_flying_a1"  # excluded: not synthetic
+_SYNTHETIC_AXIS = "evals"  # evaluations only -- see section docstring above
+_SYNTHETIC_OUTPUT_DIR = "results/synthetic_comparison"
+
+SYNTHETIC_PROPOSED_METHOD = "itcas_ndig"
+SYNTHETIC_BASELINE_METHODS: tuple[str, ...] = (
+    "random",
+    "straddle_then_sample_lse10",
+    "bes_then_sample_lse10",
+    "cas_eci",
+    "moc_cas_hard",
+)
+SYNTHETIC_METHODS: tuple[str, ...] = (SYNTHETIC_PROPOSED_METHOD,) + SYNTHETIC_BASELINE_METHODS
+
+# Stable hue per method (tab10), all solid -- six distinct algorithms, no
+# sequential/batch pair sharing one family here. itcas_ndig (proposed) gets
+# blue, matching the "proposed = blue" convention used in
+# ndig_comparison.py/ff_comparison.py; random (the trivial baseline) gets grey.
+_SYNTHETIC_METHOD_STYLES: dict[str, dict] = {
+    SYNTHETIC_PROPOSED_METHOD: {"color": "#1f77b4", "linestyle": "-"},
+    "random": {"color": "#7f7f7f", "linestyle": "-"},
+    "straddle_then_sample_lse10": {"color": "#2ca02c", "linestyle": "-"},
+    "bes_then_sample_lse10": {"color": "#ff7f0e", "linestyle": "-"},
+    "cas_eci": {"color": "#9467bd", "linestyle": "-"},
+    "moc_cas_hard": {"color": "#d62728", "linestyle": "-"},
+}
+
+
+def _synthetic_problems(problems_config: str | Path = _DEFAULT_PROBLEMS_CONFIG) -> list[str]:
+    """Every problem in ``problems_config`` except the spacecraft simulation."""
+    with Path(problems_config).open() as f:
+        problems = json.load(f)["problems"]
+    return [p for p in problems if p != _SPACECRAFT_PROBLEM]
+
+
+def _synthetic_report_to_markdown(report: StatsReport, difficulty: str) -> str:
+    """Custom renderer: higher product-curve AUC is better, rows = problems.
+
+    Mirrors ``ff_comparison._report_to_markdown``/``ndig_comparison._report_to_markdown``
+    (both of which test the opposite -- higher-is-better -- direction from
+    ``stats.report_to_markdown``'s hardcoded prose), generalized to this
+    report's 5 baseline columns and to one difficulty level's worth of groups
+    (one row per problem) rather than one row per difficulty.
+    """
+    lines: list[str] = []
+    lines.append(f"# Synthetic comparison — {SYNTHETIC_PROPOSED_METHOD} vs 5 baselines ({difficulty})")
+    lines.append("")
+    lines.append(
+        f"**Proposed:** `{report.proposed_method}` &nbsp;|&nbsp; "
+        f"**Baselines:** {', '.join(f'`{b}`' for b in SYNTHETIC_BASELINE_METHODS)} "
+        f"&nbsp;|&nbsp; **α =** {report.alpha}"
+    )
+    lines.append("")
+    lines.append(
+        "Per problem: a **Friedman omnibus test** over all six methods gates a "
+        f"**one-sided paired Wilcoxon signed-rank test** (`H1: {SYNTHETIC_PROPOSED_METHOD} > "
+        "baseline`) against each of the five baselines individually, Holm-Bonferroni corrected "
+        "over those five baselines. The per-seed scalar is the **area under the point-wise "
+        "product curve** (`summary._compute_seed_product_curve` integrated via "
+        "`summary._curve_area`) on the total-individual-evaluations axis -- higher is better "
+        "(higher-is-better metrics multiply directly into the product; FCFD, the one "
+        "lower-is-better metric, contributes as a reciprocal; see `contexts/metrics.md`)."
+    )
+    lines.append("")
+    lines.append(
+        "Significance markers: `***` p_adj < 0.001, `**` p_adj < 0.01, `*` p_adj < 0.05, `ns` not "
+        "significant. If the Friedman omnibus test does not reach significance, pairwise tests "
+        "are skipped for that problem (noted below)."
+    )
+    lines.append("")
+
+    baseline_headers = " | ".join(f"vs `{b}`" for b in SYNTHETIC_BASELINE_METHODS)
+    baseline_sep = "".join(":--------------------:|" for _ in SYNTHETIC_BASELINE_METHODS)
+    lines.append(f"| Problem | Seeds | Friedman p | Friedman sig | {baseline_headers} |")
+    lines.append(f"|:--------|------:|-----------:|:------------:|{baseline_sep}")
+
+    for g in sorted(report.groups, key=lambda x: x.problem):
+        friedman_sig = "Yes" if g.friedman_significant else "No"
+        if g.note or not g.pairwise:
+            note = g.note or "no pairwise result"
+            blanks = " | ".join(f"_{note}_" for _ in SYNTHETIC_BASELINE_METHODS)
+            lines.append(
+                f"| `{g.problem}` | {g.n_seeds} | {_fmt(g.friedman_p)} "
+                f"| {friedman_sig} | {blanks} |"
+            )
+            continue
+        by_baseline = {pw.baseline: pw for pw in g.pairwise}
+        cells = []
+        for baseline in SYNTHETIC_BASELINE_METHODS:
+            pw = by_baseline.get(baseline)
+            if pw is None:
+                cells.append("—")
+                continue
+            sig_str = _sig_marker(pw.significant, pw.p_adj)
+            cells.append(f"p_adj={_fmt(pw.p_adj)} {sig_str} (Δ={_fmt(pw.effect_median_diff)})")
+        cells_str = " | ".join(cells)
+        lines.append(
+            f"| `{g.problem}` | {g.n_seeds} | {_fmt(g.friedman_p)} "
+            f"| {friedman_sig} | {cells_str} |"
+        )
+    lines.append("")
+
+    n_tested = sum(1 for g in report.groups if g.pairwise)
+    n_total = len(report.groups)
+
+    def _count_sig(baseline: str) -> int:
+        return sum(
+            1
+            for g in report.groups
+            for pw in g.pairwise
+            if pw.baseline == baseline and pw.significant
+        )
+
+    per_baseline_summary = ", ".join(
+        f"`{b}` in **{_count_sig(b)} / {n_tested}**" for b in SYNTHETIC_BASELINE_METHODS
+    )
+    lines.append(
+        f"**Summary:** {n_tested} / {n_total} synthetic problems had a significant Friedman "
+        f"omnibus test (α={report.alpha}). Among those, `{SYNTHETIC_PROPOSED_METHOD}` "
+        f"significantly outperforms {per_baseline_summary} problems."
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _metrics_present_in_rows(rows: list) -> list[MetricSpec]:
+    """Every :class:`MetricSpec` with at least one non-``None`` curve across ``rows``.
+
+    ``rows`` is the ``(row_label, runs, cache)`` triple used throughout this
+    section (and in ``batch_vs_sequential``/``ranking``) -- kept in
+    :func:`_ordered_metrics`' registry order, matching every other grid in
+    this package.
+    """
+    seen_keys: set[str] = set()
+    for _, _, cache in rows:
+        for run_curves in cache.values():
+            for key, y in run_curves.items():
+                if y is not None:
+                    seen_keys.add(key)
+    return [s for s in _ordered_metrics() if s.key in seen_keys]
+
+
+def _draw_metric_bar_panel(
+    ax,
+    data: Optional[dict[str, float]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    method_labels: Optional[dict[str, str]],
+    *,
+    ascending_is_better: bool,
+    reference_line: Optional[float] = None,
+) -> None:
+    """Horizontal bar chart of one column's per-method scalar (rank or ratio).
+
+    ``ascending_is_better=True`` sorts smallest-first (e.g. rank, 1 = best);
+    ``False`` sorts largest-first (e.g. a higher-is-better relative-AUC
+    ratio). ``reference_line``, if given, draws a dashed vertical guide (e.g.
+    the "1.0 = best" mark for the relative-AUC figure).
+    """
+    ax.tick_params(axis="both", labelsize=7)
+    if not data:
+        ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
+                transform=ax.transAxes, fontsize=8, color="grey")
+        return
+    present = [m for m in methods if m in data]
+    present_sorted = sorted(present, key=lambda m: data[m], reverse=not ascending_is_better)
+    y_pos = list(range(len(present_sorted)))
+    colors = [method_styles[m]["color"] for m in present_sorted]
+    values = [data[m] for m in present_sorted]
+    labels = [
+        (method_labels.get(m, m) if method_labels else m) for m in present_sorted
+    ]
+    ax.barh(y_pos, values, color=colors)
+    if reference_line is not None:
+        ax.axvline(reference_line, color="black", linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.grid(True, axis="x", alpha=0.25)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=7)
+    ax.invert_yaxis()
+
+
+def _plot_avg_rank_figure(
+    avg_rank_row: dict[str, dict[str, float]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    n_rows: int,
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+) -> Optional[Path]:
+    """Standalone bar-chart figure: average rank per metric (+ product), 1 = best.
+
+    Renders what used to be the bottom row of the combined grid (see
+    ``batch_vs_sequential.plot_group_grid``'s ``avg_rank_row`` parameter) as
+    its own one-row figure, since problems are now split one-per-PDF (see
+    :func:`summarize_synthetic_comparison`) and there is no longer a shared
+    grid for this row to sit under.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    if not metrics_present:
+        return None
+
+    n_cols = len(metrics_present) + 1  # + product
+    fig_w = max(3.0 * n_cols, 10.0)
+    fig_h = max(0.4 * len(methods) + 1.5, 3.0)
+    fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    axes = axes[0]
+
+    for c_idx, spec in enumerate(metrics_present):
+        ax = axes[c_idx]
+        _draw_metric_bar_panel(
+            ax, avg_rank_row.get(spec.key), methods, method_styles, method_labels,
+            ascending_is_better=True,
+        )
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)}", fontsize=8)
+        if c_idx == 0:
+            ax.set_ylabel(f"Avg rank across {n_rows} problems\n(best to worst)", fontsize=8)
+
+    _draw_metric_bar_panel(
+        axes[-1], avg_rank_row.get("product"), methods, method_styles, method_labels,
+        ascending_is_better=True,
+    )
+    axes[-1].set_title("Product\n(raw)", fontsize=8)
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _plot_relative_auc_figure(
+    relative_auc_row: dict[str, dict[str, float]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    n_rows: int,
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+) -> Optional[Path]:
+    """Standalone bar-chart figure: average relative-AUC ratio per metric (+ product).
+
+    See :func:`itcas.reporting.ranking.relative_auc_ratios_over_rows` for the
+    exact definition: per problem, every (method, seed) AUC is divided by
+    that problem's best AUC (over every method/seed, regardless of which),
+    averaged over seeds then over problems. A ratio of 1.0 (dashed guide
+    line) means "matched the best seed-level AUC seen anywhere for that
+    problem"; a metric's *worse* direction is below 1.0 for a higher-is-better
+    metric (larger AUC is better) and above 1.0 for a lower-is-better one
+    (FCFD, smaller AUC is better) -- ``ascending_is_better`` is set per column
+    from ``spec.higher_is_better`` so each panel always sorts "closest to the
+    1.0 guide line" at the top, regardless of that column's direction.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    if not metrics_present:
+        return None
+
+    n_cols = len(metrics_present) + 1  # + product
+    fig_w = max(3.0 * n_cols, 10.0)
+    fig_h = max(0.4 * len(methods) + 1.5, 3.0)
+    fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    axes = axes[0]
+
+    for c_idx, spec in enumerate(metrics_present):
+        ax = axes[c_idx]
+        _draw_metric_bar_panel(
+            ax, relative_auc_row.get(spec.key), methods, method_styles, method_labels,
+            ascending_is_better=not spec.higher_is_better, reference_line=1.0,
+        )
+        arrow = "↑" if spec.higher_is_better else "↓"
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=8)
+        if c_idx == 0:
+            ax.set_ylabel(
+                f"Avg relative AUC across {n_rows} problems\n(1.0 = best)", fontsize=8
+            )
+
+    _draw_metric_bar_panel(
+        axes[-1], relative_auc_row.get("product"), methods, method_styles, method_labels,
+        ascending_is_better=False, reference_line=1.0,
+    )
+    axes[-1].set_title("Product ↑\n(raw)", fontsize=8)
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Synthetic comparison: per-problem summary + cross-problem combination.
+#
+# The two halves below (:func:`_synthetic_problem_report` and
+# :func:`_combine_synthetic_summaries`) are the shared core of a two-stage,
+# memory-bounded pipeline (mirroring ``summarize_benchmark`` +
+# ``summarize_from_metrics``, see ``itcas/reporting/tune_eps_archive.py``'s
+# module docstring for the anti-pattern both avoid): a per-problem stage that
+# only ever needs *one* problem's ``RunSeries``/``CurveCache`` in memory at a
+# time, and an aggregate stage that only needs the small serializable
+# summaries the per-problem stage produced -- never the raw runs of more than
+# one problem at once.
+#
+# This decomposition is exact, not approximate, because both
+# ``ranking.average_ranks_over_rows`` and
+# ``ranking.relative_auc_ratios_over_rows`` are themselves already a
+# per-row computation followed by a trivial ``sum(rs) / len(rs)`` reduction
+# across rows (see their own docstrings) -- and here each "row" is exactly
+# one problem's slice at one difficulty (:func:`batch_vs_sequential._rows_by_problem`
+# with a single-element ``problems`` list always returns at most one row).
+# So computing a rank/ratio for a single-problem row and only *combining* the
+# results later (:func:`_combine_synthetic_summaries`) reproduces bit-for-bit
+# what calling those functions once over every problem's row together would
+# produce. The monolithic :func:`summarize_synthetic_comparison` below now
+# uses this exact same pair of helpers (just without ever serializing to
+# disk between the two stages), so the two pipelines cannot silently drift
+# apart.
+# ---------------------------------------------------------------------------
+def _synthetic_problem_report(
+    problem: str,
+    runs: list[RunSeries],
+    cache: CurveCache,
+    *,
+    out_dir: str | Path | None = None,
+) -> tuple[dict[str, dict], list[str]]:
+    """One problem's contribution to the synthetic comparison, per difficulty.
+
+    Uses only ``runs``/``cache`` for this single ``problem`` -- never touches
+    any other problem's data -- so this is safe to call from a per-problem
+    job holding just one problem's ``RunSeries`` in memory.
+
+    When ``out_dir`` is given, also renders this problem's own per-difficulty
+    PDF (``<out_dir>/<difficulty>/synthetic_comparison_<problem>_vs_evaluations.pdf``),
+    byte-for-byte the same file :func:`summarize_synthetic_comparison` used to
+    render inline for this problem's row.
+
+    Returns ``(summary_by_diff, paths_written)`` where ``summary_by_diff`` is
+    ``{difficulty: {"metrics_present": [metric_key, ...], "avg_rank":
+    {column_key: {method: rank}}, "relative_auc": {column_key: {method:
+    ratio}}, "auc": {method: [seed_aucs]}}}`` -- fully JSON-serializable (see
+    :func:`save_synthetic_problem_metrics`) and exactly what
+    :func:`_combine_synthetic_summaries` expects as one entry of its
+    ``summaries_by_problem`` argument.
+    """
+    from .batch_vs_sequential import _collect_product_auc_for_stats, _rows_by_problem, plot_group_grid
+    from .method_labels import METHOD_ABBREVIATIONS
+    from .ranking import average_ranks_over_rows, relative_auc_ratios_over_rows
+
+    runs_by_problem = {problem: runs}
+    caches_by_problem = {problem: cache}
+    auc_by_diff = _collect_product_auc_for_stats(runs_by_problem, caches_by_problem).get(problem, {})
+
+    diffs = sorted({_difficulty_of(r) for r in runs})
+    summary: dict[str, dict] = {}
+    paths: list[str] = []
+    for diff in diffs:
+        rows = _rows_by_problem([problem], runs_by_problem, caches_by_problem, diff)
+        if not rows:
+            continue
+        problem_label, row_runs, row_cache = rows[0]
+
+        if out_dir is not None:
+            problem_path = (
+                Path(out_dir) / diff / f"synthetic_comparison_{problem_label}_vs_evaluations.pdf"
+            )
+            ok = plot_group_grid(
+                list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
+                [(problem_label, row_runs, row_cache)], None, problem_path,
+                include_product_rank_column=False, method_labels=METHOD_ABBREVIATIONS,
+            )
+            if ok is not None:
+                paths.append(str(ok))
+
+        metrics_present = _metrics_present_in_rows(rows)
+        avg_rank = average_ranks_over_rows(rows, list(SYNTHETIC_METHODS), _SYNTHETIC_AXIS)
+        relative_auc = relative_auc_ratios_over_rows(rows, list(SYNTHETIC_METHODS), _SYNTHETIC_AXIS)
+        summary[diff] = {
+            "metrics_present": [s.key for s in metrics_present],
+            "avg_rank": avg_rank,
+            "relative_auc": relative_auc,
+            "auc": auc_by_diff.get(diff, {}),
+        }
+
+    return summary, paths
+
+
+def save_synthetic_problem_metrics(
+    metrics_dir: str | Path,
+    problem: str,
+    summary_by_diff: dict[str, dict],
+) -> Path:
+    """Write one problem's :func:`_synthetic_problem_report` summary to JSON.
+
+    Mirrors :func:`save_problem_metrics`/:func:`load_problem_metrics`'s
+    intermediate-JSON idiom for the hypervolume pipeline, applied to the
+    synthetic-comparison summary shape instead.
+    """
+    metrics_dir = Path(metrics_dir)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    out_path = metrics_dir / f"{problem}_synthetic_metrics.json"
+    with out_path.open("w") as f:
+        json.dump({"problem": problem, "difficulties": summary_by_diff}, f)
+    return out_path
+
+
+def load_synthetic_problem_metrics(path: str | Path) -> tuple[str, dict[str, dict]]:
+    """Load one problem's summary written by :func:`save_synthetic_problem_metrics`.
+
+    Returns ``(problem_name, summary_by_diff)`` -- see
+    :func:`_synthetic_problem_report` for the shape of ``summary_by_diff``.
+    """
+    with Path(path).open() as f:
+        data = json.load(f)
+    return data["problem"], data.get("difficulties", {})
+
+
+def _combine_synthetic_summaries(
+    summaries_by_problem: dict[str, dict[str, dict]],
+) -> dict[str, dict]:
+    """Combine every problem's :func:`_synthetic_problem_report` summary.
+
+    ``summaries_by_problem`` maps ``{problem: summary_by_diff}`` -- either
+    produced in-process (the monolithic path) or reloaded from disk via
+    :func:`load_synthetic_problem_metrics` (the split aggregate path); both
+    produce identical output here since the shape is the same either way.
+
+    Each problem contributes at most one "row" per difficulty, so combining
+    those rows here by plain averaging (``sum(values) / len(values)``)
+    reproduces exactly the final reduction step inside
+    ``ranking.average_ranks_over_rows``/``relative_auc_ratios_over_rows``
+    (see the section docstring above), just performed over pre-computed
+    per-row scalars instead of raw runs.
+
+    Returns ``{difficulty: {"metrics_present": [MetricSpec, ...], "avg_rank":
+    {column_key: {method: avg_rank}}, "relative_auc": {column_key: {method:
+    avg_ratio}}, "n_rows": int, "auc_by_problem": {problem: {method:
+    [seed_aucs]}}}}`` -- ``n_rows`` is the number of problems present at that
+    difficulty, matching ``len(rows)`` in the old monolithic pipeline exactly
+    (a problem is "present" at a difficulty iff its own per-problem job found
+    at least one run there, which is precisely when it wrote an entry for
+    that difficulty in its summary).
+    """
+    diffs: set[str] = set()
+    for diff_map in summaries_by_problem.values():
+        diffs.update(diff_map.keys())
+
+    out: dict[str, dict] = {}
+    for diff in sorted(diffs):
+        metric_keys: set[str] = set()
+        rank_lists: dict[str, dict[str, list[float]]] = {}
+        ratio_lists: dict[str, dict[str, list[float]]] = {}
+        auc_by_problem: dict[str, dict[str, list[float]]] = {}
+        n_rows = 0
+        for problem, diff_map in summaries_by_problem.items():
+            entry = diff_map.get(diff)
+            if entry is None:
+                continue
+            n_rows += 1
+            metric_keys.update(entry.get("metrics_present") or [])
+            for column_key, method_vals in (entry.get("avg_rank") or {}).items():
+                for method, val in method_vals.items():
+                    rank_lists.setdefault(column_key, {}).setdefault(method, []).append(val)
+            for column_key, method_vals in (entry.get("relative_auc") or {}).items():
+                for method, val in method_vals.items():
+                    ratio_lists.setdefault(column_key, {}).setdefault(method, []).append(val)
+            if entry.get("auc"):
+                auc_by_problem[problem] = entry["auc"]
+
+        avg_rank = {
+            ck: {m: sum(vs) / len(vs) for m, vs in md.items() if vs}
+            for ck, md in rank_lists.items()
+        }
+        relative_auc = {
+            ck: {m: sum(vs) / len(vs) for m, vs in md.items() if vs}
+            for ck, md in ratio_lists.items()
+        }
+        metrics_present = [s for s in _ordered_metrics() if s.key in metric_keys]
+
+        out[diff] = {
+            "metrics_present": metrics_present,
+            "avg_rank": avg_rank,
+            "relative_auc": relative_auc,
+            "n_rows": n_rows,
+            "auc_by_problem": auc_by_problem,
+        }
+    return out
+
+
+def _render_synthetic_aggregate(
+    summaries_by_problem: dict[str, dict[str, dict]],
+    output_dir: str | Path,
+    alpha: float = 0.05,
+) -> list[str]:
+    """Render the three cross-problem outputs from combined per-problem summaries.
+
+    Shared by :func:`summarize_synthetic_comparison` (monolithic, in-memory)
+    and :func:`summarize_synthetic_comparison_aggregate` (split, disk-backed)
+    so both write byte-for-byte the same
+    ``synthetic_comparison_avg_rank_vs_evaluations.pdf``,
+    ``synthetic_comparison_relative_auc_vs_evaluations.pdf``, and
+    ``synthetic_comparison_stats_report.{json,md}`` per difficulty.
+    """
+    from .method_labels import METHOD_ABBREVIATIONS
+
+    out_dir = Path(output_dir)
+    combined = _combine_synthetic_summaries(summaries_by_problem)
+
+    paths: list[str] = []
+    for diff, entry in combined.items():
+        diff_dir = out_dir / diff
+        metrics_present = entry["metrics_present"]
+        n_rows = entry["n_rows"]
+
+        avg_rank_path = diff_dir / "synthetic_comparison_avg_rank_vs_evaluations.pdf"
+        ok = _plot_avg_rank_figure(
+            entry["avg_rank"], list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
+            metrics_present, n_rows, avg_rank_path,
+            method_labels=METHOD_ABBREVIATIONS,
+        )
+        if ok is not None:
+            paths.append(str(ok))
+
+        relative_auc_path = diff_dir / "synthetic_comparison_relative_auc_vs_evaluations.pdf"
+        ok = _plot_relative_auc_figure(
+            entry["relative_auc"], list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
+            metrics_present, n_rows, relative_auc_path,
+            method_labels=METHOD_ABBREVIATIONS,
+        )
+        if ok is not None:
+            paths.append(str(ok))
+
+        data = {
+            problem: {_SYNTHETIC_AXIS: {diff: method_aucs}}
+            for problem, method_aucs in entry["auc_by_problem"].items()
+        }
+        report = run_stats(data, proposed_method=SYNTHETIC_PROPOSED_METHOD, alpha=alpha)
+
+        diff_dir.mkdir(parents=True, exist_ok=True)
+        json_path = diff_dir / "synthetic_comparison_stats_report.json"
+        md_path = diff_dir / "synthetic_comparison_stats_report.md"
+        json_path.write_text(report_to_json(report), encoding="utf-8")
+        md_path.write_text(_synthetic_report_to_markdown(report, diff), encoding="utf-8")
+        paths.extend([str(json_path), str(md_path)])
+
+    return paths
+
+
+def summarize_synthetic_comparison(
+    input_dir: str | Path,
+    problems_config: str | Path = _DEFAULT_PROBLEMS_CONFIG,
+    output_dir: str | Path | None = None,
+    alpha: float = 0.05,
+) -> list[str]:
+    """ITCAS (batch) vs 5 baselines on every synthetic problem, one folder per difficulty.
+
+    Writes, under ``<output_dir>/<difficulty>/``:
+
+    * ``synthetic_comparison_<problem>_vs_evaluations.pdf`` -- one PDF **per
+      problem** (not one combined grid): a single row of metric curves + raw
+      product, no product-rank column (that per-iteration "who's ahead right
+      now" column made sense when comparing across a shared grid; split
+      one-problem-per-PDF it added nothing beyond the metric/product curves
+      already shown).
+    * ``synthetic_comparison_avg_rank_vs_evaluations.pdf`` -- one standalone
+      figure: each method's average rank (1 = best) per metric + product,
+      averaged across every problem at this difficulty (see
+      :func:`_plot_avg_rank_figure` and
+      ``ranking.average_ranks_over_rows``). This used to be a bottom row
+      glued onto the combined grid; it is now its own PDF since there is no
+      longer one combined grid for it to sit under.
+    * ``synthetic_comparison_relative_auc_vs_evaluations.pdf`` -- one more
+      standalone figure: for each metric (+ product) on each problem, the
+      best AUC across every method/seed is found, every (method, seed) AUC is
+      divided by that best, averaged over seeds then over problems (see
+      :func:`_plot_relative_auc_figure` and
+      ``ranking.relative_auc_ratios_over_rows``).
+    * ``synthetic_comparison_stats_report.{json,md}`` -- Friedman-gated,
+      Holm-Bonferroni corrected one-sided paired Wilcoxon dominance test
+      (``H1: itcas_ndig > baseline``) against each of the five baselines,
+      one row per problem (see :func:`_synthetic_report_to_markdown`).
+
+    See the module-level section docstring above for why this only ever uses
+    the evaluations axis and excludes ``spacecraft_formation_flying_a1``.
+
+    This is the monolithic (single-process) form of the pipeline: it holds
+    every synthetic problem's ``RunSeries``/``CurveCache`` in memory at once,
+    which is fine for small local test runs but not for the full sweep (see
+    :func:`summarize_synthetic_comparison_problem` /
+    :func:`summarize_synthetic_comparison_aggregate` for the memory-bounded,
+    per-problem + aggregate split used operationally on the cluster). Both
+    forms share :func:`_synthetic_problem_report` and
+    :func:`_combine_synthetic_summaries`, so they cannot silently drift apart.
+    """
+    from .batch_vs_sequential import _collect_family_runs
+
+    input_path = Path(input_dir)
+    problems = _synthetic_problems(problems_config)
+    out_dir = Path(output_dir) if output_dir is not None else Path(_SYNTHETIC_OUTPUT_DIR)
+
+    runs_by_problem = _collect_family_runs(input_path, problems, list(SYNTHETIC_METHODS))
+    caches_by_problem = {p: _precompute(runs) for p, runs in runs_by_problem.items() if runs}
+
+    summaries_by_problem: dict[str, dict[str, dict]] = {}
+    paths: list[str] = []
+    for problem in problems:
+        runs = runs_by_problem.get(problem, [])
+        if not runs:
+            continue
+        cache = caches_by_problem.get(problem, {})
+        summary, problem_paths = _synthetic_problem_report(problem, runs, cache, out_dir=out_dir)
+        summaries_by_problem[problem] = summary
+        paths.extend(problem_paths)
+
+    paths.extend(_render_synthetic_aggregate(summaries_by_problem, out_dir, alpha=alpha))
+    return paths
+
+
+def summarize_synthetic_comparison_problem(
+    input_dir: str | Path,
+    problem: str,
+    problems_config: str | Path = _DEFAULT_PROBLEMS_CONFIG,
+    output_dir: str | Path | None = None,
+    save_metrics_dir: str | Path | None = None,
+    alpha: float = 0.05,
+) -> list[str]:
+    """Per-problem half of the split synthetic-comparison pipeline.
+
+    Loads only ``problem``'s own runs (never any other problem's ``.jsonl``
+    logs), renders its per-difficulty PDF(s) under ``output_dir`` exactly as
+    :func:`summarize_synthetic_comparison` does for that problem's row (same
+    file names, same content), and -- when ``save_metrics_dir`` is given --
+    writes ``<save_metrics_dir>/<problem>_synthetic_metrics.json`` (see
+    :func:`save_synthetic_problem_metrics`) so a later
+    :func:`summarize_synthetic_comparison_aggregate` call can combine every
+    problem's contribution without re-reading any run logs.
+
+    ``problems_config`` is used only to validate ``problem`` is one of the
+    synthetic problems (i.e. not the excluded spacecraft simulation).
+    ``alpha`` is accepted for CLI/signature symmetry with the other
+    synthetic-comparison entry points but is unused here: the Friedman/
+    Wilcoxon stats report needs every problem's raw per-seed AUCs together
+    and is only produced by :func:`summarize_synthetic_comparison_aggregate`.
+    """
+    from .batch_vs_sequential import _collect_family_runs
+
+    del alpha  # unused here, see docstring
+
+    input_path = Path(input_dir)
+    out_dir = Path(output_dir) if output_dir is not None else Path(_SYNTHETIC_OUTPUT_DIR)
+
+    synthetic_problems = _synthetic_problems(problems_config)
+    if problem not in synthetic_problems:
+        raise ValueError(
+            f"'{problem}' is not one of the synthetic problems in {problems_config} "
+            "(or is the excluded spacecraft_formation_flying_a1 simulation)"
+        )
+
+    runs = _collect_family_runs(input_path, [problem], list(SYNTHETIC_METHODS)).get(problem, [])
+    if not runs:
+        return []
+    cache = _precompute(runs)
+
+    summary, paths = _synthetic_problem_report(problem, runs, cache, out_dir=out_dir)
+
+    if save_metrics_dir is not None:
+        metrics_path = save_synthetic_problem_metrics(save_metrics_dir, problem, summary)
+        paths.append(str(metrics_path))
+
+    return paths
+
+
+def summarize_synthetic_comparison_aggregate(
+    metrics_dir: str | Path,
+    output_dir: str | Path | None = None,
+    alpha: float = 0.05,
+) -> list[str]:
+    """Aggregate half of the split synthetic-comparison pipeline.
+
+    Reads every ``*_synthetic_metrics.json`` under ``metrics_dir`` (written
+    by :func:`summarize_synthetic_comparison_problem`) -- no ``.jsonl`` run
+    logs, no ``RunSeries`` reconstruction, for any problem -- and produces,
+    per difficulty found across those files, the same three aggregate
+    outputs :func:`summarize_synthetic_comparison` writes today:
+    ``synthetic_comparison_avg_rank_vs_evaluations.pdf``,
+    ``synthetic_comparison_relative_auc_vs_evaluations.pdf``, and
+    ``synthetic_comparison_stats_report.{json,md}``, all under
+    ``<output_dir>/<difficulty>/``.
+    """
+    metrics_path = Path(metrics_dir)
+    out_dir = Path(output_dir) if output_dir is not None else metrics_path.parent
+
+    summaries_by_problem: dict[str, dict[str, dict]] = {}
+    for f in sorted(metrics_path.glob("*_synthetic_metrics.json")):
+        problem, diffs = load_synthetic_problem_metrics(f)
+        summaries_by_problem[problem] = diffs
+
+    if not summaries_by_problem:
+        return []
+
+    return _render_synthetic_aggregate(summaries_by_problem, out_dir, alpha=alpha)
 
 
 # ---------------------------------------------------------------------------
@@ -1143,9 +1882,83 @@ def main(argv: Optional[list[str]] = None) -> int:
             "Does not require --input-dir."
         ),
     )
+    parser.add_argument(
+        "--synthetic-comparison", action="store_true", dest="synthetic_comparison",
+        help=(
+            "Produce the itcas_ndig (batch) vs 5-baseline comparison on synthetic "
+            "problems (see summarize_synthetic_comparison): one output folder per "
+            "difficulty level, evaluations axis only. Ignores --benchmark/"
+            "--save-metrics/--aggregate-from."
+        ),
+    )
+    parser.add_argument(
+        "--problems-config", type=str, default=_DEFAULT_PROBLEMS_CONFIG,
+        dest="problems_config",
+        help=(
+            "Path to the final-problems config (used with --synthetic-comparison "
+            "and --synthetic-comparison-problem)."
+        ),
+    )
+    parser.add_argument(
+        "--synthetic-comparison-problem", type=str, default=None,
+        dest="synthetic_comparison_problem",
+        help=(
+            "Per-problem half of the split synthetic-comparison pipeline (see "
+            "summarize_synthetic_comparison_problem): loads only this one problem's "
+            "runs, renders its own PDF(s), and -- when --save-metrics is given -- "
+            "writes <save-metrics>/<problem>_synthetic_metrics.json for a later "
+            "--synthetic-comparison-aggregate-from run. Paired with --input-dir/"
+            "--output-dir/--save-metrics/--problems-config. Use this (fanned out one "
+            "job per problem) instead of --synthetic-comparison on the full sweep to "
+            "avoid loading every synthetic problem's run history into memory at once."
+        ),
+    )
+    parser.add_argument(
+        "--synthetic-comparison-aggregate-from", type=str, default=None,
+        dest="synthetic_comparison_aggregate_from",
+        help=(
+            "Aggregate half of the split synthetic-comparison pipeline (see "
+            "summarize_synthetic_comparison_aggregate): loads every "
+            "*_synthetic_metrics.json under this directory (written by "
+            "--synthetic-comparison-problem runs) and produces the combined "
+            "avg-rank/relative-AUC figures + stats report. Paired with --output-dir/"
+            "--alpha. Does not require --input-dir and never reads any run logs."
+        ),
+    )
     args = parser.parse_args(argv)
 
     kw = dict(alpha=args.alpha)
+
+    if args.synthetic_comparison_problem is not None:
+        if args.input_dir is None:
+            parser.error("--input-dir is required for --synthetic-comparison-problem")
+        paths = summarize_synthetic_comparison_problem(
+            args.input_dir, args.synthetic_comparison_problem,
+            problems_config=args.problems_config, output_dir=args.output_dir,
+            save_metrics_dir=args.save_metrics, **kw,
+        )
+        for p in paths:
+            print(p)
+        return 0
+
+    if args.synthetic_comparison_aggregate_from is not None:
+        paths = summarize_synthetic_comparison_aggregate(
+            args.synthetic_comparison_aggregate_from, output_dir=args.output_dir, **kw
+        )
+        for p in paths:
+            print(p)
+        return 0
+
+    if args.synthetic_comparison:
+        if args.input_dir is None:
+            parser.error("--input-dir is required for --synthetic-comparison")
+        paths = summarize_synthetic_comparison(
+            args.input_dir, problems_config=args.problems_config,
+            output_dir=args.output_dir, **kw,
+        )
+        for p in paths:
+            print(p)
+        return 0
 
     if args.aggregate_from is not None:
         paths = summarize_from_metrics(

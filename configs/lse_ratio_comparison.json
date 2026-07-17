@@ -1,6 +1,6 @@
 {
-    "default_difficulty": 0.1,
     "lse_proportions": [10, 25, 50],
+    "bases": ["straddle_then_sample", "bes_then_sample"],
     "problems": [
         "all_valley_8d",
         "alpine_12d",
@@ -18,25 +18,5 @@
         "rastrigin_griewank_sphere_20d",
         "styblinski_tang_levy_10d",
         "zdt3_6d"
-    ],
-    "sequential_methods":{
-        "lse": [
-            "straddle_then_sample",
-            "bes_then_sample"
-        ],
-        "cas": [
-            "cas_eci",
-            "moc_cas_hard"
-        ]
-    },
-    "batch_methods": {
-        "lse": [
-            "straddle_then_sample",
-            "bes_then_sample"
-        ],
-        "cas": [
-            "cas_eci_batch",
-            "moc_cas_hard_batch"
-        ]
-    }
+    ]
 }

@@ -1030,6 +1030,23 @@ import tempfile
 import time
 from pathlib import Path
 
+from .ff_sim_broker_client import (
+    broker_is_available as _ff_broker_heartbeat_ok,
+    default_queue_dir as _ff_broker_default_queue_dir,
+    submit_via_broker as _ff_broker_submit,
+)
+
+
+def _ff_sim_use_broker() -> bool:
+    """Opt-in switch for the Slurm-dispatch broker (see ff_sim_broker_client.py
+    and scripts/ff_sim_broker/broker.py). Defaults to OFF: unset/false means
+    ``_slurm_batch_fn`` behaves exactly as before (one direct ``sbatch`` call
+    per evaluate_true() call), so this has zero effect on any run that
+    doesn't explicitly set FF_SIM_USE_BROKER=1.
+    """
+    return os.environ.get("FF_SIM_USE_BROKER", "0").strip().lower() in ("1", "true", "yes")
+
+
 # Deadband geometry (must match scarlet-gamma-deakin-dev/utils.py)
 _DEADBAND_TARGET = [0.0, -245.0, 0.0]        # Hill frame, meters
 _DEADBAND_HALF_WIDTHS = [52.5, 105.0, 125.0]  # meters
@@ -1527,13 +1544,74 @@ class SpacecraftFormationFlyingA1(Problem):
     # Slurm batch evaluator                                                #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _ff_row_to_params(row) -> dict:
+        """Convert one 16-D design+context row into the simulator's params dict.
+
+        Shared by the direct-sbatch path and the opt-in broker path (see
+        ff_sim_broker_client.py) so both build identical simulator inputs.
+        """
+        q_log = row[0:6].tolist()
+        r_log = row[6:9].tolist()
+        dt = float(row[9])
+        pos = row[10:13].tolist()
+        vel = row[13:16].tolist()
+        return {
+            "Q_weight": [10.0 ** q for q in q_log],
+            "R_weight": [10.0 ** r for r in r_log],
+            "control_update_interval": dt,
+            "initial_position": pos,
+            "initial_velocity": vel,
+        }
+
+    def _ff_result_dict_to_y(self, res: Optional[dict]) -> list:
+        """Convert one parsed result_NNNN.json dict (or None) to a Y row.
+
+        ``None`` (missing/unreadable/failed result) yields the worst-case
+        penalty constraints, exactly matching the pre-broker behavior for
+        crashed/timed-out simulations. Shared by the direct-sbatch and
+        broker dispatch paths so the scoring logic lives in exactly one
+        place.
+        """
+        y = _penalty_constraints(
+            rmse_threshold=self._rmse_threshold_m,
+            fuel_threshold_g=self._fuel_threshold_g,
+            peak_thrust_threshold=self._peak_thrust_threshold_n,
+        )
+        if res is not None:
+            try:
+                if res.get("status") == "ok":
+                    y = _metrics_to_constraints(
+                        res.get("rmse_position"),
+                        res.get("fuel_consumption"),
+                        res.get("peak_thrust_command"),
+                        rmse_threshold=self._rmse_threshold_m,
+                        fuel_threshold_g=self._fuel_threshold_g,
+                        peak_thrust_threshold=self._peak_thrust_threshold_n,
+                    )
+            except Exception:
+                pass
+        return y
+
     def _slurm_batch_fn(self, X: torch.Tensor) -> torch.Tensor:
         """Evaluate N inputs by submitting a Slurm array job.
 
         Each task runs formation_flying_simulator.py for one row of X.
         Results are collected from output JSON files and returned as (N, 3).
         Failed or timed-out tasks receive worst-case penalty values.
+
+        Dispatch mode: by default (FF_SIM_USE_BROKER unset/false) this
+        submits one direct ``sbatch`` job per call, unchanged from before.
+        Setting FF_SIM_USE_BROKER=1 in the environment routes the same
+        request through the opt-in Slurm-dispatch broker instead (see
+        ff_sim_broker_client.py / scripts/ff_sim_broker/broker.py), which
+        merges concurrent single-simulation requests from multiple processes
+        into fewer, bigger Slurm jobs. Purely a dispatch/resource change --
+        scoring is identical either way (_ff_result_dict_to_y is shared).
         """
+        if _ff_sim_use_broker():
+            return self._slurm_batch_fn_broker(X)
+
         X_np = X.detach().cpu().double().numpy()
         N = int(X_np.shape[0])
 
@@ -1557,19 +1635,7 @@ class SpacecraftFormationFlyingA1(Problem):
         try:
             # Write per-task params files
             for i in range(N):
-                row = X_np[i]
-                q_log = row[0:6].tolist()
-                r_log = row[6:9].tolist()
-                dt = float(row[9])
-                pos = row[10:13].tolist()
-                vel = row[13:16].tolist()
-                params = {
-                    "Q_weight": [10.0 ** q for q in q_log],
-                    "R_weight": [10.0 ** r for r in r_log],
-                    "control_update_interval": dt,
-                    "initial_position": pos,
-                    "initial_velocity": vel,
-                }
+                params = self._ff_row_to_params(X_np[i])
                 with open(job_dir / f"params_{i:04d}.json", "w") as f:
                     _json.dump(params, f)
 
@@ -1648,27 +1714,14 @@ class SpacecraftFormationFlyingA1(Problem):
             Y_rows: list[list] = []
             for i in range(N):
                 result_path = job_dir / f"result_{i:04d}.json"
-                y = _penalty_constraints(
-                    rmse_threshold=self._rmse_threshold_m,
-                    fuel_threshold_g=self._fuel_threshold_g,
-                    peak_thrust_threshold=self._peak_thrust_threshold_n,
-                )
+                res = None
                 if result_path.exists():
                     try:
                         with open(result_path) as f:
                             res = _json.load(f)
-                        if res.get("status") == "ok":
-                            y = _metrics_to_constraints(
-                                res.get("rmse_position"),
-                                res.get("fuel_consumption"),
-                                res.get("peak_thrust_command"),
-                                rmse_threshold=self._rmse_threshold_m,
-                                fuel_threshold_g=self._fuel_threshold_g,
-                                peak_thrust_threshold=self._peak_thrust_threshold_n,
-                            )
                     except Exception:
-                        pass
-                Y_rows.append(y)
+                        res = None
+                Y_rows.append(self._ff_result_dict_to_y(res))
 
         finally:
             if not all_ok and job_id:
@@ -1680,6 +1733,62 @@ class SpacecraftFormationFlyingA1(Problem):
                 )
             shutil.rmtree(job_dir, ignore_errors=True)
 
+        return torch.tensor(Y_rows, dtype=X.dtype)
+
+    def _slurm_batch_fn_broker(self, X: torch.Tensor) -> torch.Tensor:
+        """Broker-dispatched variant of _slurm_batch_fn (opt-in via
+        FF_SIM_USE_BROKER=1). Same inputs/outputs/scoring as the direct
+        path -- only how the Slurm job gets submitted differs: this process
+        writes its pending simulation requests into a shared queue directory
+        instead of calling ``sbatch`` itself, and a separate broker daemon
+        (scripts/ff_sim_broker/broker.py) merges requests from potentially
+        many concurrent callers into fewer, bigger jobs.
+
+        If no broker daemon appears to be running against the queue
+        directory, fails fast with a clear error rather than silently
+        blocking every caller for the full job_timeout.
+        """
+        X_np = X.detach().cpu().double().numpy()
+        N = int(X_np.shape[0])
+
+        slurm_script = self._smartsat_root / "ff_sim_batch.sbatch"
+        if not slurm_script.exists():
+            raise FileNotFoundError(
+                f"Slurm script not found: {slurm_script}. "
+                "Expected at SmartSat/ff_sim_batch.sbatch"
+            )
+
+        queue_dir = Path(
+            os.environ.get("FF_SIM_BROKER_QUEUE_DIR")
+            or _ff_broker_default_queue_dir(self._smartsat_root)
+        )
+        if not _ff_broker_heartbeat_ok(queue_dir):
+            raise RuntimeError(
+                f"FF_SIM_USE_BROKER=1 but no live broker heartbeat found at "
+                f"{queue_dir}/broker.heartbeat. Start it with "
+                "scripts/ff_sim_broker/start_broker.sh before running with "
+                "FF_SIM_USE_BROKER=1 (or unset FF_SIM_USE_BROKER to fall back "
+                "to direct per-call sbatch submission)."
+            )
+
+        params_list = [self._ff_row_to_params(X_np[i]) for i in range(N)]
+        results = _ff_broker_submit(
+            params_list,
+            queue_dir=queue_dir,
+            job_timeout=self._job_timeout,
+            poll_interval=self._poll_interval,
+        )
+
+        n_missing = sum(1 for r in results if r is None)
+        if n_missing:
+            import warnings as _warnings
+            _warnings.warn(
+                f"[ff_sim broker] {n_missing}/{N} tasks produced no result.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        Y_rows = [self._ff_result_dict_to_y(res) for res in results]
         return torch.tensor(Y_rows, dtype=X.dtype)
 
 
