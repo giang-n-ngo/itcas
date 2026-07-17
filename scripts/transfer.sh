@@ -1,0 +1,4 @@
+rsync -avzP /home/giangn/itcas/results/sweep/styblinski_tang_levy_10d/p0_01/itcas/ndig giangn@login-f.ai.deakin.edu.au:/home/giangn/ITCAS/results/sweep/styblinski_tang_levy_10d/p0_01/itcas
+rsync -avzP /home/giangn/itcas/results/sweep/styblinski_tang_levy_10d/p0_05/itcas/ndig giangn@login-f.ai.deakin.edu.au:/home/giangn/ITCAS/results/sweep/styblinski_tang_levy_10d/p0_05/itcas
+rsync -avzP /home/giangn/itcas/results/sweep/styblinski_tang_levy_10d/p0_1/itcas/ndig giangn@login-f.ai.deakin.edu.au:/home/giangn/ITCAS/results/sweep/styblinski_tang_levy_10d/p0_1/itcas
+rsync -avzP /home/giangn/itcas/results/sweep/styblinski_tang_levy_10d/p0_2/itcas/ndig giangn@login-f.ai.deakin.edu.au:/home/giangn/ITCAS/results/sweep/styblinski_tang_levy_10d/p0_2/itcas
