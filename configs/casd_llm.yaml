@@ -1,0 +1,34 @@
+# Context-Aware Safe Decoding (CASD) benchmark config (contexts/llm_application.md).
+#
+# Requires a running scripts/casd_server/server.py instance reachable at
+# $CASD_SERVER_URL (default http://localhost:8008) -- see
+# requirements-casd-server.txt for the server's own env setup / launch
+# command. For a dependency-free smoke test, launch the server with --mock
+# (or CASD_MOCK=1); real runs need the server started with real vLLM +
+# judge models loaded on a GPU node.
+#
+# Thresholds (tau_safety=0.5, tau_utility=0.0) are PLACEHOLDERS -- see
+# ContextAwareSafeDecoding's docstring in itcas/pipeline/problems.py for why
+# the generic 200k-MC calibrate_thresholds() recipe isn't usable here; a
+# dedicated (small-N or offline) calibration is a follow-up open item.
+#
+# batch_size=8: amortizes the HTTP round-trip to the CASD server and gives
+# vLLM's continuous batching engine enough concurrent sequences per call to
+# be efficient, while staying cheap for BoTorch's batch acquisition
+# optimization over the 5-dim z=(x,c) space -- matches the convention
+# already used for the harder/higher-dim problems in configs/experiments.json
+# (D>=12 or 3-objective problems use 8; most lower-dim ones use 4).
+#
+# budget=200: low end of the spec's T=200-300 typical-budget range.
+problem: casd_llm
+method: random
+budget: 200
+batch_size: 8
+n_init: 16
+n_candidates: 256
+n_ts_samples: 1
+seed: 0
+target_X: 20
+radius: 0.1
+out_dir: results/casd_llm
+run_name: casd_llm_random

@@ -11,16 +11,34 @@
     "separate": [],
     "group": [
       {
-        "_comment": "",
+        "_comment": "casd_llm baselines: Random, ECI, MOC-CAS (hard variant, the one abbreviated 'MOC-CAS' in itcas/reporting/method_labels.py), Straddle-then-Sample and BES-then-Sample at a 10% LSE-stage split. All are sequential (batch_size irrelevant to them; effective batch is 1). REQUIRES a running casd_llm evaluator server first -- see scripts/README.md 'CASD server (H100/H200)' -- and CASD_SERVER_URL exported in the shell that runs scripts/submit.sh (submit.sh forwards the full env via --export=ALL) so every array task can reach it.",
         "methods": [
-          "straddle_then_sample_lse25",
-          "straddle_then_sample_lse50"
+          "random",
+          "cas_eci",
+          "moc_cas_hard",
+          "straddle_then_sample_lse10",
+          "bes_then_sample_lse10"
         ],
         "problems": [
-          "spacecraft_formation_flying_a1"
+          "casd_llm"
         ],
-        "difficulties": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "difficulties": [1, 2, 3, 4],
         "quality": [
+        ],
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "_comment": "casd_llm proposed method: itcas with the NDIG quality variant ('NDIG-B' in itcas/reporting/method_labels.py). Same server requirement as the group above.",
+        "methods": [
+          "itcas"
+        ],
+        "problems": [
+          "casd_llm"
+        ],
+        "difficulties": [1, 2, 3, 4],
+        "quality": [
+          "ndig"
         ],
         "seeds": "0-19",
         "n_concurrent": 4

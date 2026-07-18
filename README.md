@@ -14,7 +14,8 @@ itcas/
                    # kept in roi_mi.py/qd_dpp.py/itcas.py
   baselines/       # Random, ONE-S, EZ, EISR, STRADDLE, CAS-ECI, MOC-CAS hard/soft
                    # (eps-constraint and MOO+Cluster: TODO)
-  pipeline/        # Experiment loop, problem registry
+  pipeline/        # Experiment loop, problem registry, casd_client.py (CASD
+                   # evaluator-server HTTP client)
   metrics/         # Context fill distance (CFD), feasible context fill distance
                    # (FCFD), FCHV, LogDet, number of positives, AUP
   io/              # JSONL run logger
@@ -24,8 +25,11 @@ itcas/
   visualize.py     # `python -m itcas.visualize`
 configs/           # YAML/JSON experiment configs + calibrated thresholds.json
 scripts/           # Slurm submission: install_env, calibrate, submit(.sh),
-                   # submit_jobs.sbatch, run_seedset.sh, jobs.json
+                   # submit_jobs.sbatch, run_seedset.sh, jobs.json,
+                   # casd_server/ (CASD evaluator server, separate env)
 tests/             # Pure-Python smoke tests
+requirements.txt              # itcas env (BoTorch/GPyTorch) — used by everything above
+requirements-casd-server.txt  # SEPARATE env for the CASD evaluator server (see below)
 ```
 
 ## Run
@@ -166,6 +170,57 @@ python -m itcas.cli --problem sphere2_6d --method itcas --threshold_pct 0.1
 
 Each entry records the thresholds, achieved fraction, per-objective maxima/
 minima, the solved quantile level, sample count and seed for reproducibility.
+
+## CASD benchmark (LLM decoding-hyperparameter search)
+
+`casd_llm` (registered in `itcas.pipeline.PROBLEM_REGISTRY`) is the
+Context-Aware Safe Decoding benchmark described in
+[`contexts/llm_application.md`](contexts/llm_application.md): a 5-D contextual
+problem (3 decoding hyperparameters `x` + 2 prompt features `c`) whose two
+objectives (safety, utility) are scored by actually generating text with an
+LLM and judging the output. Unlike every other problem in `PROBLEM_REGISTRY`,
+its objective function is **not** evaluated in-process — evaluation is
+delegated over HTTP to a separate, persistent evaluator server
+(`scripts/casd_server/server.py`) that keeps a vLLM engine and two HF judge
+models resident on a GPU. That server runs in its **own** Python environment
+(`requirements-casd-server.txt`), never `itcas`'s (`requirements.txt`), because
+vLLM's own torch/transformers pinning would conflict with the BoTorch/GPyTorch
+stack — see that file's header for the full rationale and install/launch
+commands.
+
+The `itcas` process finds the server via the `CASD_SERVER_URL` env var
+(default `http://localhost:8008`); see `ContextAwareSafeDecoding` in
+`itcas/pipeline/problems.py` for the client-side details (nearest-real-prompt
+context snapping, penalty fallback on server errors, etc.).
+
+### Quick local smoke test (no GPU, no model downloads)
+
+The server has a `--mock` mode that skips loading vLLM/the judges/the dataset
+entirely and serves cheap synthetic scores instead — enough to exercise the
+HTTP protocol and the full BO loop plumbing:
+
+```bash
+# In the casd-server env (or anywhere with fastapi+uvicorn installed):
+python scripts/casd_server/server.py --mock --port 8008
+
+# In another shell, in the itcas env:
+CASD_SERVER_URL=http://localhost:8008 python -m itcas.cli --config configs/casd_llm.yaml
+```
+
+### Real runs (GPU required)
+
+Real evaluation needs the server started with real vLLM + judge models
+loaded on a GPU node (`CASD_MOCK` unset), which on this project's cluster
+means the Slurm-driven launch documented in
+[`scripts/README.md`](scripts/README.md#casd-server-h100h200). Once a real
+server is running and its address is exported as `CASD_SERVER_URL`, `itcas`
+runs against `casd_llm` exactly as in the smoke test above.
+
+**Thresholds are placeholders.** `configs/casd_llm.yaml`'s feasibility
+thresholds (`tau_safety=0.5`, `tau_utility=0.0`) have not been calibrated
+against real judge-model output — see the "OPEN ITEM" note in
+`ContextAwareSafeDecoding`'s docstring. Don't treat `casd_llm` results as
+difficulty-calibrated until that's done.
 
 ## Cluster (Slurm) submission
 

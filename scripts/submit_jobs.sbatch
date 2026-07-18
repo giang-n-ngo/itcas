@@ -7,7 +7,6 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --time=1-00:00:00
-#SBATCH --constraint=gpu-l40s|gpu-v100
 #SBATCH --output=slurm_logs/itcas_gpu_%A_%a.out
 #SBATCH --error=slurm_logs/itcas_gpu_%A_%a.err
 #SBATCH --mail-user=g.ngo@deakin.edu.au

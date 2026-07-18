@@ -12,7 +12,10 @@
 #
 # Environment overrides:
 #     MAX_GPUS=48            # max concurrent array tasks (=GPUs). Default 48.
-#     PARTITION=gpu         # GPU partition. Default 'gpu'.
+#     PARTITION=gpu,gpu-large  # GPU partition(s), comma-separated -- Slurm
+#                            # schedules on whichever frees up first. Default
+#                            # 'gpu,gpu-large' (A100s + H100/H200s); set to a
+#                            # single partition to pin to one.
 #     QOS=batch-short       # batch-short (<=5d) or batch-long (<=10d).
 #     TIME=1-00:00:00       # per-job wallclock limit (D-HH:MM:SS).
 #     GPUS=1                # GPUs per job; type-qualify as v100:1 if required.
@@ -79,7 +82,7 @@ K=$(jq -e "${JOBS_FILTER} | length" "${JOBS_JSON}") || {
 (( K > 0 )) || { echo "ERROR: '.jobs' is empty." >&2; exit 2; }
 
 MAX_GPUS="${MAX_GPUS:-48}"
-PARTITION="${PARTITION:-gpu}"
+PARTITION="${PARTITION:-gpu,gpu-large}"
 QOS="${QOS:-batch-short}"
 TIME="${TIME:-1-00:00:00}"
 GPUS="${GPUS:-1}"

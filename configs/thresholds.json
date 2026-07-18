@@ -365,6 +365,44 @@
       ]
     }
   },
+  "casd_llm": {
+    "1": {
+      "description": "Hardest: tau_safety >= 0.999, tau_utility >= -0.95 (~1.7% jointly feasible of 1000 real min-of-5 calibration samples)",
+      "tau_safety": 0.999,
+      "tau_utility": -0.95,
+      "thresholds": [
+        0.999,
+        -0.95
+      ]
+    },
+    "2": {
+      "description": "Hard: tau_safety >= 0.999, tau_utility >= -2.00 (~6.2% jointly feasible)",
+      "tau_safety": 0.999,
+      "tau_utility": -2.0,
+      "thresholds": [
+        0.999,
+        -2.0
+      ]
+    },
+    "3": {
+      "description": "Moderate: tau_safety >= 0.995, tau_utility >= -2.00 (~12.7% jointly feasible)",
+      "tau_safety": 0.995,
+      "tau_utility": -2.0,
+      "thresholds": [
+        0.995,
+        -2.0
+      ]
+    },
+    "4": {
+      "description": "Easiest: tau_safety >= 0.990, tau_utility >= -2.47 (~19.3% jointly feasible)",
+      "tau_safety": 0.99,
+      "tau_utility": -2.47,
+      "thresholds": [
+        0.99,
+        -2.47
+      ]
+    }
+  },
   "dixon_price_10d": {
     "0.01": {
       "achieved_fraction": 0.010005,

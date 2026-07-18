@@ -1,0 +1,248 @@
+# CASD server — Python environment requirements
+# ===============================================
+# Standalone requirements file for the "Context-Aware Safe Decoding" (CASD)
+# benchmark's evaluator server (scripts/casd_server/server.py). This is a
+# SEPARATE environment from the main `itcas` env (see requirements.txt at
+# the repo root, pinned to torch>=2.5 / gpytorch>=1.14 / botorch>=0.13-0.16).
+#
+# Why separate: vLLM + a 7-8B generative model + HF judge models need their
+# own torch/transformers/vLLM version pinning that would conflict with the
+# BoTorch/GPyTorch stack. This mirrors how `SpacecraftFormationFlyingA1`
+# keeps its Basilisk simulator in a separate env (see
+# itcas/pipeline/problems.py's `sim_conda_env` handling and
+# itcas/pipeline/ff_sim_broker_client.py) — except here isolation is a
+# *persistent local server process* (not a per-call subprocess or Slurm
+# job), because the whole point of the benchmark (<0.5s/eval) requires vLLM
+# + judge model weights to stay resident on the GPU across many evaluate()
+# calls instead of being reloaded every time.
+#
+# This file is NOT imported by, or referenced from, the `itcas` package.
+# scripts/casd_server/server.py is a standalone script that only needs to be
+# importable within this env, on a GPU node.
+#
+# Install (into its own conda env / venv, on a GPU node):
+#     conda create -n casd-server python=3.10 -y
+#     conda activate casd-server
+#     pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
+#         -r requirements-casd-server.txt
+#   The `--extra-index-url` is REQUIRED on this cluster (driver reports CUDA
+#   12.7 — a plain `pip install -r requirements-casd-server.txt` with no
+#   index override risks the resolver picking an incompatible torch/CUDA
+#   build). See the "GPU note" below for the full rationale, the incident
+#   that motivated this, and the exact verified command(s).
+#
+# Launch the server (manual — no .sbatch launcher is provided here; that is
+# the Slurm Operator's responsibility, not this file's):
+#     conda activate casd-server
+#     CASD_TARGET_MODEL=Qwen/Qwen2.5-7B-Instruct \
+#     CASD_N_PROMPTS=750 \
+#     python scripts/casd_server/server.py --host 0.0.0.0 --port 8008
+#
+# Then, from the itcas env / process, point the CASD problem at it:
+#     export CASD_SERVER_URL=http://<gpu-node-hostname>:8008
+#
+# For a quick CPU-only smoke test with no GPU / model downloads at all, run
+# with synthetic scoring instead of real vLLM + judge inference:
+#     python scripts/casd_server/server.py --mock --port 8008
+#   (or set CASD_MOCK=1 in the environment)
+#
+# GPU note (CORRECTED 2026-07-17 — see incident below):
+#   vLLM requires a CUDA-capable GPU with enough VRAM for the target model
+#   (Qwen2.5-7B-Instruct in bf16 needs ~16GB+; an H100/H200/A100 is assumed
+#   by the benchmark spec).
+#
+#   PREVIOUSLY this file left `torch` and `vllm` unpinned ("let vllm's own
+#   resolver pick a compatible torch"), on the theory that vLLM always pulls
+#   a matching CUDA torch build. That was WRONG on this cluster and broke a
+#   real install: `pip install -r requirements-casd-server.txt` on an H100
+#   node (gpu-large, jobs 113176/113180, 2026-07) resolved `vllm>=0.6.0` to
+#   vllm==0.25.1, which pulled torch==2.11.0+cu130 (a CUDA 13.0 build). This
+#   cluster's NVIDIA driver reports CUDA capability 12070 (i.e. 12.7), which
+#   is too old for a cu130 torch build, so every GPU op failed with:
+#     "RuntimeError: The NVIDIA driver on your system is too old
+#      (found version 12070) ..."
+#   (from both `torch.cuda.get_device_name()` at install-verify time and
+#   vLLM's own `gpu_worker.py: init_device()` at server startup — see
+#   slurm_logs/casd_server/install-113176.err and server-113180.err).
+#
+#   Root cause: unlike the `itcas` env (requirements.txt, pinned
+#   torch>=2.5), this file had NO version ceiling on `vllm`, so pip always
+#   grabs vLLM's newest release — and vLLM hard-pins an EXACT torch version
+#   per release (its published wheel metadata has `torch==X.Y.Z`, not
+#   `torch>=`), so a fresh `vllm==0.25.1` drags in whatever torch/CUDA
+#   generation is current at install time, with no independent control over
+#   the torch/CUDA build. "Don't pin torch, let vllm pick" is therefore
+#   backwards for this cluster: vLLM's *version* has to be pinned to
+#   control which torch build gets pulled in.
+#
+#   Fix: pin `vllm==0.8.5.post1`. Verified via PyPI's published wheel
+#   metadata (https://pypi.org/pypi/vllm/0.8.5.post1/json, `requires_dist`)
+#   that this exact release hard-pins:
+#     torch==2.6.0, torchaudio==2.6.0, torchvision==0.21.0
+#   and torch 2.6.0 is the LAST torch release for which PyTorch publishes a
+#   `+cu124` wheel at https://download.pytorch.org/whl/cu124 (confirmed by
+#   listing that index: torch 2.4.0/2.4.1/2.5.0/2.5.1/2.6.0 all have cu124
+#   builds; 2.7.0+ only ships cu126/cu128/cu129/cu130, no cu124). cu124
+#   requires driver >= CUDA 12.4, which this cluster's 12.7 driver satisfies
+#   — and this is the EXACT torch+CUDA combination already empirically
+#   verified to see the GPU on this cluster: `torch 2.6.0+cu124`,
+#   `torch.cuda.is_available()=True` (see scripts/README.md's "0) One-time:
+#   build the conda env" section, and scripts/install_env.sbatch's
+#   TORCH_INDEX_URL default). torchvision==0.21.0+cu124 and
+#   torchaudio==2.6.0+cu124 wheels also exist on that same index (checked
+#   directly), so all three of vLLM's pinned torch-family deps resolve from
+#   cu124 with no fallback to a mismatched default build.
+#
+#   requires_python for vllm==0.8.5.post1 is `<3.13,>=3.9`, compatible with
+#   this env's Python 3.10.
+#
+#   Install — exact command for the Slurm Operator's install_env.sbatch.
+#   REQUIRED: a `--extra-index-url` pointing at the cu124 PyTorch index is
+#   what makes pip pick the `+cu124`-tagged torch/vision/audio build instead
+#   of plain PyPI's build (PEP 440 local-version-tag precedence: a version
+#   with a local segment like `2.6.0+cu124` sorts higher than plain `2.6.0`,
+#   so once both indices are visible, pip's resolver prefers the cu124
+#   build for an exact `==2.6.0` pin):
+#
+#     conda create -n casd-server python=3.10 -y
+#     conda activate casd-server
+#     python -m pip install --upgrade pip
+#     python -m pip install \
+#         --extra-index-url https://download.pytorch.org/whl/cu124 \
+#         -r requirements-casd-server.txt
+#
+#   This ONE command is sufficient (no separate torch pre-install step
+#   needed, unlike scripts/install_env.sbatch's two-step pattern for the
+#   itcas env) — CONFIRMED by a metadata-only `pip install --dry-run`
+#   resolution (no GPU / no full download needed) run against this exact
+#   file with that exact `--extra-index-url` flag, both with cu124 as the
+#   primary `--index-url` and, separately, as `--extra-index-url` alongside
+#   default PyPI: both orderings resolved to
+#     torch-2.6.0+cu124 torchaudio-2.6.0+cu124 torchvision-0.21.0+cu124
+#     vllm-0.8.5.post1
+#   with zero dependency conflicts across vLLM's full tree (ray, xformers,
+#   transformers, fastapi, outlines, etc.). If you'd rather mirror
+#   scripts/install_env.sbatch's belt-and-suspenders two-step pattern
+#   exactly (pre-install torch/vision/audio first, then plain
+#   `pip install -r requirements-casd-server.txt` with no extra-index-url),
+#   that also works and resolves identically:
+#     python -m pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+#         --index-url https://download.pytorch.org/whl/cu124
+#     python -m pip install -r requirements-casd-server.txt
+#
+#   Confidence: HIGH. `vllm==0.8.5.post1` -> `torch==2.6.0` is directly
+#   confirmed via PyPI JSON API `requires_dist` metadata for that exact
+#   release (not inferred). `torch==2.6.0+cu124` working on this cluster's
+#   driver (12.7) is not a new claim — it's the same build already
+#   empirically verified for the `itcas` env on this same cluster (see
+#   scripts/README.md). The full-file pip dependency resolution above (which
+#   needs no GPU) was actually run and produced exactly the expected
+#   `+cu124`-tagged package set with no conflicts. What is NOT yet verified
+#   from this side (no GPU access): that vLLM's CUDA extension actually
+#   *runs* correctly end-to-end (kernel launches, `init_device()`,
+#   real-mode generation) on the H100 — that is the Slurm Operator's next
+#   step, re-running scripts/casd_server/install_env.sbatch.
+#
+# transformers incident (2026-07-17): the torch/vllm fix above got the
+#   install working and the server past `torch.cuda.is_available()`, but
+#   real-mode server startup (no CASD_MOCK) then crashed 31s in, in
+#   `LLM.__init__` -> `init_tokenizer_from_configs` ->
+#   `get_cached_tokenizer()`, with:
+#     AttributeError: Qwen2Tokenizer has no attribute
+#     all_special_tokens_extended
+#   (see slurm_logs/casd_server/server-113216.err). This is the SAME failure
+#   pattern as the torch incident above, on a different transitive dep: this
+#   file left `transformers>=4.44` with no upper bound, so
+#   install-113195.out shows it resolved to `transformers==5.14.1` (latest
+#   at install time). vllm==0.8.5.post1's own tokenizer-caching code
+#   (`vllm/transformers_utils/tokenizer.py: get_cached_tokenizer()`) reads
+#   `tokenizer.all_special_tokens_extended` unconditionally; transformers
+#   5.x's `Qwen2Tokenizer` (a `PreTrainedTokenizerFast` subclass) no longer
+#   exposes that attribute the way vLLM's April-2025-era code expects, so
+#   every real-mode startup fails before any GPU/model work happens. This
+#   matches a known, recurring vLLM/transformers-5.x incompatibility
+#   (see e.g. vllm-project/vllm#13127 and community reports of the identical
+#   `all_special_tokens_extended` AttributeError against transformers 5.0+
+#   paired with vllm 0.8.x-0.11.x-era releases).
+#
+#   Fix: pin `transformers==4.51.3` — NOT a guessed "just stay below 5.0"
+#   bound, but the EXACT version vLLM's own v0.8.5.post1 release pinned in
+#   its own test suite (`requirements/test.txt` at git tag `v0.8.5.post1`:
+#   `transformers==4.51.3`), i.e. the version vLLM's maintainers actually
+#   built and tested this release against. It also satisfies vLLM's own
+#   looser runtime lower bound (`vllm==0.8.5.post1` requires_dist:
+#   `transformers>=4.51.1`, confirmed via the PyPI JSON API). A metadata-only
+#   `pip install --dry-run` of this full file (transformers pinned to
+#   4.51.3, everything else unchanged) resolved with ZERO conflicts across
+#   vLLM's whole tree, producing: torch-2.6.0+cu124, vllm-0.8.5.post1,
+#   transformers-4.51.3, tokenizers-0.21.4 (satisfies vLLM's
+#   `tokenizers>=0.21.1` and transformers 4.51.3's own
+#   `tokenizers<0.22,>=0.21`), huggingface_hub-0.36.2 (satisfies vLLM's
+#   `huggingface-hub>=0.30.0` and transformers 4.51.3's own
+#   `huggingface-hub<1.0,>=0.30.0`), accelerate-1.14.0, datasets-5.0.0.
+#   `accelerate` was also checked: it is NOT in vllm==0.8.5.post1's own
+#   requires_dist at all (vLLM doesn't hard-depend on it), and
+#   scripts/casd_server/server.py never uses `device_map=`/accelerate's
+#   dispatch path (models are loaded with `AutoModel...from_pretrained(...)`
+#   and moved with plain `.to(device)`), so it isn't in the same
+#   tight-transitive-pin risk class as torch or transformers and was left
+#   unbounded (`accelerate>=0.33`, currently resolving to 1.14.0, works
+#   fine in the dry-run above). `tokenizers` and `huggingface_hub` are
+#   likewise left without their own explicit pins in this file: they are
+#   already transitively bounded by transformers==4.51.3's own metadata
+#   (`tokenizers<0.22,>=0.21`, `huggingface-hub<1.0,>=0.30.0`), which the
+#   dry-run confirms is compatible with vLLM's own constraints on both.
+#
+#   Confidence: HIGH for the pin itself (vLLM's own CI-tested transformers
+#   version for this exact tag, plus a clean zero-conflict dry-run resolve).
+#   NOT yet verified from this side (no GPU access): that real-mode server
+#   startup actually gets past tokenizer init and completes end-to-end on
+#   the H100 — that is the Slurm Operator's next step, reinstalling into the
+#   existing `casd-server` env (`pip install -r
+#   requirements-casd-server.txt` will downgrade the already-installed
+#   `transformers==5.14.1` to `4.51.3`) and re-running
+#   scripts/casd_server/launch_server.sbatch.
+
+# --- Serving / generation ---
+# vllm is pinned to an EXACT version (not >=) because vLLM hard-pins an
+# exact torch version per release in its own wheel metadata; an unpinned
+# `vllm>=0.6.0` silently drifts to whatever torch/CUDA generation is
+# current at install time (this broke the 2026-07 install — see note
+# above). 0.8.5.post1 is the newest 0.8.x patch release still pinned to
+# torch==2.6.0 (the last torch with a cu124 wheel); vllm==0.9.0 bumps to
+# torch==2.7.0 (cu126/cu128 only — untested on this cluster, do not switch
+# to it without re-verifying a cu126 or cu128 torch build here first).
+vllm==0.8.5.post1
+# Exact pins matching vllm==0.8.5.post1's own hard-pinned torch stack
+# (see https://pypi.org/pypi/vllm/0.8.5.post1/json -> info.requires_dist).
+# Listed here explicitly (in addition to the pre-install step documented
+# above) so `pip install -r requirements-casd-server.txt` alone is at
+# least self-consistent/reproducible even if the pre-install step is
+# skipped by mistake.
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+# Pinned EXACT (not >=) for the same reason vllm is pinned exact above: an
+# unbounded `transformers>=4.44` silently drifted to `transformers==5.14.1`
+# at install time, which broke vllm==0.8.5.post1's tokenizer init with
+# `AttributeError: Qwen2Tokenizer has no attribute
+# all_special_tokens_extended` (real-mode server crash, 2026-07 — see
+# "transformers incident" note above). 4.51.3 is the exact version
+# vllm==0.8.5.post1's own test suite (requirements/test.txt at git tag
+# v0.8.5.post1) pins, and satisfies vLLM's own runtime lower bound
+# (transformers>=4.51.1 per PyPI requires_dist for this vllm release).
+transformers==4.51.3
+# Left unbounded: not in vllm==0.8.5.post1's own requires_dist (vLLM doesn't
+# hard-depend on it), and this server never uses accelerate's device_map
+# dispatch path — see "transformers incident" note above for the check.
+accelerate>=0.33
+sentencepiece>=0.2.0
+protobuf>=4.25
+
+# --- Dataset (RealToxicityPrompts) ---
+datasets>=2.20
+huggingface_hub>=0.24
+
+# --- HTTP server ---
+fastapi>=0.111
+uvicorn>=0.30

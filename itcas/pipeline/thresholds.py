@@ -75,25 +75,49 @@ def _joint_fraction(Y: torch.Tensor, tau: torch.Tensor) -> float:
     return float((Y >= tau).all(dim=-1).to(torch.double).mean().item())
 
 
-def calibrate_thresholds(
-    problem: Problem,
+def calibrate_thresholds_from_samples(
+    problem_name: str,
+    Y: torch.Tensor,
     target_fraction: float = 0.10,
-    n_samples: int = 200_000,
+    n_samples: Optional[int] = None,
     seed: int = 0,
     max_iter: int = 64,
+    method_label: str = "equal-marginal-quantile-bisection",
 ) -> CalibrationResult:
-    """Find tau so that ~`target_fraction` of uniform samples are jointly feasible.
+    """Bisection core of ``calibrate_thresholds``, decoupled from sampling.
 
-    Uses the noiseless objective (``problem.fn``) so the constraints describe the
-    true feasible region S, independent of observation noise.
+    Finds tau so that ~`target_fraction` of the *already-evaluated* rows in
+    ``Y`` are jointly feasible, via the same equal-marginal-quantile
+    bisection described in the module docstring. Takes a precomputed
+    ``Y`` (N, m) tensor of (noiseless) objective values instead of a
+    ``Problem`` + sampler, so callers whose evaluations are expensive (e.g.
+    a live HTTP server, one row/chunk at a time) can assemble ``Y``
+    themselves -- via any sampling/evaluation strategy, at any batch size --
+    and still get back the exact same ``CalibrationResult`` shape that
+    ``calibrate_thresholds`` produces for the cheap synthetic benchmarks.
+
+    Args:
+        problem_name: value to record in the result's ``problem`` field
+            (``CalibrationResult.problem``); does not need a live ``Problem``
+            instance.
+        Y: (N, m) tensor of noiseless objective values.
+        target_fraction: target joint-feasible fraction in (0, 1).
+        n_samples: value to record in the result's ``n_samples`` field.
+            Defaults to ``Y.shape[0]`` (the actual row count) when None --
+            pass this explicitly only if it should differ from ``len(Y)``
+            (e.g. reporting the originally *requested* sample count when
+            some evaluations were dropped).
+        seed: value to record in the result's ``seed`` field (informational
+            only here; the RNG that produced ``Y`` already ran upstream).
+        max_iter: bisection iterations.
+        method_label: value to record in the result's ``method`` field.
     """
     if not 0.0 < target_fraction < 1.0:
         raise ValueError(f"target_fraction must be in (0, 1); got {target_fraction}")
 
-    X = problem.sample_uniform(n_samples, seed=seed).to(torch.double)
-    Y = problem.fn(X).to(torch.double)  # (N, m), noiseless
+    Y = Y.to(torch.double)
     if Y.dim() != 2:
-        raise ValueError(f"problem.fn must return (N, m); got shape {tuple(Y.shape)}")
+        raise ValueError(f"Y must have shape (N, m); got shape {tuple(Y.shape)}")
 
     maxima = Y.max(dim=0).values
     minima = Y.min(dim=0).values
@@ -118,7 +142,7 @@ def calibrate_thresholds(
 
     achieved = _joint_fraction(Y, tau)
     return CalibrationResult(
-        problem=problem.name,
+        problem=problem_name,
         target_fraction=float(target_fraction),
         achieved_fraction=float(achieved),
         thresholds=[float(v) for v in tau.tolist()],
@@ -126,10 +150,47 @@ def calibrate_thresholds(
         minima=[float(v) for v in minima.tolist()],
         quantile_level=float(q),
         margin_below_max=[float(m - t) for m, t in zip(maxima.tolist(), tau.tolist())],
-        n_samples=int(n_samples),
+        n_samples=int(n_samples) if n_samples is not None else int(Y.shape[0]),
         seed=int(seed),
-        method="equal-marginal-quantile-bisection",
+        method=method_label,
         created=_dt.datetime.now().isoformat(timespec="seconds"),
+    )
+
+
+def calibrate_thresholds(
+    problem: Problem,
+    target_fraction: float = 0.10,
+    n_samples: int = 200_000,
+    seed: int = 0,
+    max_iter: int = 64,
+) -> CalibrationResult:
+    """Find tau so that ~`target_fraction` of uniform samples are jointly feasible.
+
+    Uses the noiseless objective (``problem.fn``) so the constraints describe the
+    true feasible region S, independent of observation noise. Draws the
+    samples itself (cheap for the synthetic benchmarks this is designed
+    for); see ``calibrate_thresholds_from_samples`` for the reusable
+    bisection core against a precomputed ``Y``, used e.g. by problems whose
+    evaluations are too expensive to draw 200k of in one shot.
+    """
+    if not 0.0 < target_fraction < 1.0:
+        # Fail fast, before spending an (expensive) n_samples-sized sampling
+        # + evaluation pass -- calibrate_thresholds_from_samples re-checks
+        # this too, but only after Y already exists.
+        raise ValueError(f"target_fraction must be in (0, 1); got {target_fraction}")
+
+    X = problem.sample_uniform(n_samples, seed=seed).to(torch.double)
+    Y = problem.fn(X).to(torch.double)  # (N, m), noiseless
+    if Y.dim() != 2:
+        raise ValueError(f"problem.fn must return (N, m); got shape {tuple(Y.shape)}")
+
+    return calibrate_thresholds_from_samples(
+        problem_name=problem.name,
+        Y=Y,
+        target_fraction=target_fraction,
+        n_samples=n_samples,
+        seed=seed,
+        max_iter=max_iter,
     )
 
 

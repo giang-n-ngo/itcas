@@ -627,6 +627,14 @@
       "0.2": {
         "eps_archive": 0.105817
       }
+    },
+    "casd_llm": {
+      "_comment": "CASD (LLM decoding-hyperparameter search) evaluates via a separate persistent HTTP server (scripts/casd_server/server.py, CASD_SERVER_URL) -- budget=250 sits in the spec's own suggested T=200-300 query range (contexts/llm_application.md Part 4); difficulty (1-4) only changes thresholds (configs/thresholds.json[\"casd_llm\"]), not sizing, so there is a single defaults block, no per-difficulty override.",
+      "defaults": {
+        "budget": 250,
+        "batch_size": 5,
+        "n_init": 20
+      }
     }
   }
 }

@@ -182,14 +182,21 @@ Runs on `--partition=cpu --qos=cpu` (Monte-Carlo sampling, no GPU). Overrides:
 # Preview the array sizing / sbatch command without submitting:
 DRY_RUN=1 CONDA_ENV=itcas scripts/submit.sh scripts/jobs.json
 
-# Submit (partition defaults to 'gpu', 1 GPU/job, throttled to MAX_GPUS=2):
+# Submit (partition defaults to 'gpu,gpu-large' -- Slurm schedules each task
+# on whichever of the A100 (gpu) or H100/H200 (gpu-large) partitions has a
+# free GPU first -- 1 GPU/job, throttled to MAX_GPUS=48):
 CONDA_ENV=itcas scripts/submit.sh scripts/jobs.json
 ```
 
-Defaults follow the cluster format: `--partition=gpu`, `--gpus=1`,
-`--qos=batch-short`, `--time=1-00:00:00`, array throttle `%MAX_GPUS` (=2, the
-per-user GPU cap). Override via env: `PARTITION`, `GPUS` (e.g. `v100:1`), `QOS`,
-`TIME`, `MAX_GPUS`, `ACCOUNT`, `CONDA_ENV`.
+Defaults follow the cluster format: `--partition=gpu,gpu-large`, `--gpus=1`,
+`--qos=batch-short`, `--time=1-00:00:00`, array throttle `%MAX_GPUS` (=48, a
+self-imposed courtesy cap, not an enforced per-user quota -- there is no
+`MaxTRESPerUser` set on this account/QOS, so the cluster won't stop you at a
+higher number, but a large sweep can still queue behind `(Resources)` for a
+while since every node's GPUs get claimed fast by other users regardless of
+partition; `squeue -p gpu -p gpu-large` shows who's using what). Override via
+env: `PARTITION` (comma-separated list, or a single partition to pin to one),
+`GPUS` (e.g. `v100:1`), `QOS`, `TIME`, `MAX_GPUS`, `ACCOUNT`, `CONDA_ENV`.
 
 ## Logs & monitoring
 
@@ -235,3 +242,118 @@ It is safe to re-submit at any time — existing PDFs are overwritten with the
 current set of completed seeds. The companion per-iteration line plots
 (`itcas.visualize`) are still emitted automatically at the end of each sweep
 job and live next to the runs under `<results_root>/<problem>/<difficulty>/`.
+
+## CASD server (H100/H200)
+
+The `casd_llm` problem (see the root [`README.md`](../README.md#casd-benchmark-llm-decoding-hyperparameter-search))
+evaluates via HTTP against a separate, persistent server process
+(`scripts/casd_server/server.py`) that keeps a vLLM engine + judge models
+resident on a GPU — it does **not** run inside the normal `itcas`
+sweep/array jobs above, and it lives in its **own** conda env
+(`casd-server`, from `requirements-casd-server.txt`), never `itcas`'s.
+
+| Script | Kind | Purpose |
+|--------|------|---------|
+| `scripts/casd_server/install_env.sbatch` | GPU job | Build/verify the `casd-server` conda env (`requirements-casd-server.txt`). |
+| `scripts/casd_server/launch_server.sbatch` | GPU job, **persistent** | Runs `scripts/casd_server/server.py` until cancelled or its time limit expires — this is a long-lived service, not a batch job that exits on its own. |
+
+Both target `gpu-large` (H100/H200 — the default `gpu*` partition is
+A100-only) and request exactly **1 GPU** (`--gres=gpu:h100:1`, not a whole
+node — a 7B model in bf16 needs ~16-20GB, far less than one H100/H200's
+VRAM).
+
+### 0) One-time: build the `casd-server` conda env (GPU job)
+
+```bash
+sbatch scripts/casd_server/install_env.sbatch
+```
+
+Pre-installs `torch==2.6.0`/`torchvision==0.21.0`/`torchaudio==2.6.0` from the
+`cu124` PyTorch index before `pip install -r requirements-casd-server.txt`
+(see that file's header for the full incident writeup — an earlier unpinned
+`torch`/`transformers` resolved to CUDA-13.0/transformers-5.x builds
+incompatible with this cluster's driver and with `vllm==0.8.5.post1`
+respectively; both are now pinned). **Always fully recreates the `casd-server`
+env from scratch** (`conda env remove` + recreate, not an in-place update) —
+an earlier version of this script updated in place, which let orphaned
+packages from a previous broken install (`flashinfer`/`tvm_ffi`, compiled
+against a stale torch ABI) survive a later fix and crash real-mode startup.
+Verified end-to-end on an H100 (job 113219): `torch 2.6.0+cu124`,
+`transformers 4.51.3`, `torch.cuda.is_available()=True`.
+
+### 1) Validate cheaply first: launch in mock mode
+
+Before spending real GPU time loading actual model weights, validate the
+Slurm/launch mechanics with the server's `--mock` mode (synthetic scores, no
+vLLM/judge/dataset loading at all):
+
+```bash
+sbatch --export=ALL,CASD_MOCK=1 scripts/casd_server/launch_server.sbatch
+```
+
+Once `squeue --me` shows it `RUNNING`, check
+`slurm_logs/casd_server/server-<jobid>.out` for a `[casd-server] healthy: ...`
+line, then read the address it wrote:
+
+```bash
+cat slurm_logs/casd_server/address.txt          # <hostname>:<port>, e.g. h100-m-11:8008
+curl http://$(cat slurm_logs/casd_server/address.txt)/health
+```
+
+Login-node → compute-node HTTP reachability was confirmed to work directly
+(no tunnel/proxy needed) — any job anywhere on the cluster with normal
+network access can reach the server the same way, so client (`itcas`) jobs
+do **not** need to run on `gpu-large` themselves.
+
+### 2) Real mode
+
+```bash
+sbatch scripts/casd_server/launch_server.sbatch
+```
+
+Real-mode startup (model download + vLLM engine init + 2 judge models + the
+HF RealToxicityPrompts subsample) takes on the order of several minutes; the
+launcher's health-poll window (`HEALTH_WAIT_SECS`, default 2400s/40min)
+accommodates this — job 113220 came up healthy in ~3.5 minutes and returned a
+real (non-mock) `/evaluate` result:
+`[{"f1": 0.999, "f2": -3.636}]` for temperature=0.9/top_p=0.9/repetition_penalty=1.1
+against context_id=0, with vLLM generation and judge-model inference confirmed
+in the job logs. Once healthy, point any `itcas` run at it:
+
+```bash
+export CASD_SERVER_URL=http://$(cat slurm_logs/casd_server/address.txt)
+python -m itcas.cli --config configs/casd_llm.yaml
+```
+
+Cancelling the job (`scancel <jobid>`) or letting it hit its time limit
+cleanly stops the server and removes `slurm_logs/casd_server/address.txt` (a
+termination trap in the launcher handles this) — treat this as a bounded
+dev/validation allocation, not an always-on production service; resubmit as
+needed.
+
+### 3) Run a `casd_llm` sweep against it
+
+Once the server is healthy (step 2), `CASD_SERVER_URL` must be exported in
+the *same shell that calls `scripts/submit.sh`* — `submit.sh` submits with
+`--export=ALL`, which forwards the whole current environment (including this
+var) to every array task, so it does not need to be re-exported per task:
+
+```bash
+export CASD_SERVER_URL=http://$(cat slurm_logs/casd_server/address.txt)
+CONDA_ENV=itcas scripts/submit.sh scripts/jobs.json
+```
+
+`/evaluate` on the server serializes requests behind a lock (vLLM's offline
+`LLM.generate()` isn't safe to call from multiple threads at once), so all
+array tasks/seeds share one GPU's worth of generation throughput regardless
+of how many Slurm tasks are running concurrently — this is a real bottleneck
+for a sequential-baseline-heavy sweep (one `/evaluate` call per evaluated
+point) and is the main thing to watch if a `casd_llm` sweep is running slower
+than expected; launch a second server + point different job-sets' `CASD_SERVER_URL`
+at it if that becomes limiting (not automated — no client-side load
+balancing across servers exists yet).
+
+### Logs
+
+`slurm_logs/casd_server/install-<jobid>.{out,err}`,
+`slurm_logs/casd_server/server-<jobid>.{out,err}`.
