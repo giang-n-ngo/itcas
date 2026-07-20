@@ -242,6 +242,12 @@ protobuf>=4.25
 # --- Dataset (RealToxicityPrompts) ---
 datasets>=2.20
 huggingface_hub>=0.24
+# KD-tree for the neighborhood-evaluation radius lookup
+# (scripts/casd_server/calibrate_neighbors.py, server.py's
+# `_build_real_pool`/`_resolve_neighborhood`). Already a transitive dep of
+# vllm==0.8.5.post1, pinned explicitly here so it isn't silently dropped if
+# that changes.
+scipy>=1.11
 
 # --- HTTP server ---
 fastapi>=0.111

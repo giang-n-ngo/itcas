@@ -281,6 +281,36 @@ against a stale torch ABI) survive a later fix and crash real-mode startup.
 Verified end-to-end on an H100 (job 113219): `torch 2.6.0+cu124`,
 `transformers 4.51.3`, `torch.cuda.is_available()=True`.
 
+### 0b) One-time: build the neighbor lookup table (CPU-only, no GPU needed)
+
+Real mode evaluates each queried context against a SAMPLE of its whole
+*neighborhood* of real RealToxicityPrompts prompts (not just the single
+nearest one) — see `contexts/llm_application.md` Part 5's "Full-dataset
+neighborhood evaluation". The full (uncapped) neighborhood structure is
+precomputed once, offline, against the full ~99k-prompt dataset; how many
+of it get sampled per query is a separate, server-side runtime knob
+(`CASD_NEIGHBORS_PER_EVAL`, default 3 — see step 2 below):
+
+```bash
+conda activate casd-server
+python scripts/casd_server/calibrate_neighbors.py build \
+    --radius 0.001 \
+    --out results/casd_llm/neighbor_calibration/neighbor_lookup.npz
+```
+
+This is CPU-only (tokenization + a KD-tree radius query, no vLLM/GPU) and
+takes well under a minute. `--radius 0.001` is the calibrated value (mean
+31.64 raw neighbors/prompt over the real data, only 2.5% isolated — see
+`calibrate_neighbors.py sweep` and its module docstring if the target
+model, length cap, or desired coverage ever change and this needs
+re-deriving; an earlier, smaller radius that also capped the table itself
+at 5 neighbors left 22.8% of prompts isolated and, at real evaluation
+scale, intermittently CUDA-OOM'd the judge-scoring step — both fixed by
+decoupling "how big is the true neighborhood" from "how many get sampled
+per query"). The server refuses to start in real mode if this file is
+missing, or if `CASD_TARGET_MODEL`/`CASD_LENGTH_CAP_TOKENS` don't match
+what it was built with (token counts are tokenizer-specific).
+
 ### 1) Validate cheaply first: launch in mock mode
 
 Before spending real GPU time loading actual model weights, validate the

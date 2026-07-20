@@ -1741,6 +1741,90 @@ def test_run_lock_prevents_concurrent_runs(tmp_path=None):
             pass
 
 
+def test_casd_sample_uniform_health_check_retries_then_succeeds():
+    """A transient /health blip (fails a couple times, then recovers) must
+    not abort the run: sample_uniform should retry with backoff and proceed
+    once the health check comes back up, instead of raising immediately."""
+    import warnings
+    from unittest.mock import patch
+
+    from itcas.pipeline import problems as problems_mod
+    from itcas.pipeline.problems import ContextAwareSafeDecoding
+
+    p = ContextAwareSafeDecoding(
+        server_url="http://fake-casd:8008",
+        health_check_retries=5,
+        health_check_backoff=0.01,
+    )
+
+    calls = {"health": 0}
+
+    def flaky_health(base_url, timeout=5.0):
+        calls["health"] += 1
+        return calls["health"] > 2  # fails twice, then succeeds
+
+    fake_rows = [
+        {"context_id": i, "prompt_toxicity": 0.1, "prompt_length": 20.0}
+        for i in range(4)
+    ]
+    sleep_calls: list = []
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with patch.object(
+            problems_mod._casd_client, "server_is_available", side_effect=flaky_health
+        ), patch.object(
+            problems_mod._casd_client, "sample_contexts", return_value=fake_rows
+        ), patch.object(
+            problems_mod.time, "sleep", side_effect=sleep_calls.append
+        ):
+            Z = p.sample_uniform(4, seed=0)
+
+    assert Z.shape == (4, 5)
+    assert calls["health"] == 3  # 2 failures + 1 success, then stop retrying
+    # One backoff sleep per failed attempt, strictly increasing (exponential).
+    assert len(sleep_calls) == 2
+    assert sleep_calls[0] < sleep_calls[1]
+    assert any("GET /health" in str(w.message) for w in caught)
+
+
+def test_casd_sample_uniform_health_check_raises_after_sustained_outage():
+    """A sustained outage (/health always fails) must still raise the same
+    RuntimeError as before the retry loop was added -- no silent pass-
+    through, and no unbounded/infinite retrying."""
+    from unittest.mock import patch
+
+    from itcas.pipeline import problems as problems_mod
+    from itcas.pipeline.problems import ContextAwareSafeDecoding
+
+    p = ContextAwareSafeDecoding(
+        server_url="http://fake-casd:8008",
+        health_check_retries=3,
+        health_check_backoff=0.01,
+    )
+
+    calls = {"health": 0}
+
+    def always_down(base_url, timeout=5.0):
+        calls["health"] += 1
+        return False
+
+    sleep_calls: list = []
+    with patch.object(
+        problems_mod._casd_client, "server_is_available", side_effect=always_down
+    ), patch.object(problems_mod.time, "sleep", side_effect=sleep_calls.append):
+        try:
+            p.sample_uniform(4, seed=0)
+            raise AssertionError("expected RuntimeError for sustained CASD outage")
+        except RuntimeError as e:
+            assert "CASD server not reachable" in str(e)
+
+    # Exactly health_check_retries attempts total, with (retries - 1) sleeps
+    # in between -- confirms it neither gives up early nor retries forever.
+    assert calls["health"] == 3
+    assert len(sleep_calls) == 2
+
+
 if __name__ == "__main__":
     test_qd_dpp_greedy_prefers_diverse_high_quality()
     test_qd_dpp_context_kernel_enforces_context_diversity()
@@ -1777,6 +1861,8 @@ if __name__ == "__main__":
     test_synthetic_comparison_split_pipeline_matches_monolithic()
     test_run_lock_prevents_concurrent_runs()
     test_evaluate_true_matches_input_device_and_dtype()
+    test_casd_sample_uniform_health_check_retries_then_succeeds()
+    test_casd_sample_uniform_health_check_raises_after_sustained_outage()
     test_parse_seed_spec_ranges_and_singletons()
     test_run_name_for_seed_template_and_suffix()
     test_pending_seeds_skips_completed()

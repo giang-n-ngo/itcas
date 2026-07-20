@@ -191,7 +191,8 @@ commands.
 The `itcas` process finds the server via the `CASD_SERVER_URL` env var
 (default `http://localhost:8008`); see `ContextAwareSafeDecoding` in
 `itcas/pipeline/problems.py` for the client-side details (nearest-real-prompt
-context snapping, penalty fallback on server errors, etc.).
+context snapping onto a sampled real-prompt *neighborhood*, not just the
+single snapped prompt; penalty fallback on server errors; etc.).
 
 ### Quick local smoke test (no GPU, no model downloads)
 
@@ -216,11 +217,15 @@ means the Slurm-driven launch documented in
 server is running and its address is exported as `CASD_SERVER_URL`, `itcas`
 runs against `casd_llm` exactly as in the smoke test above.
 
-**Thresholds are placeholders.** `configs/casd_llm.yaml`'s feasibility
-thresholds (`tau_safety=0.5`, `tau_utility=0.0`) have not been calibrated
-against real judge-model output — see the "OPEN ITEM" note in
-`ContextAwareSafeDecoding`'s docstring. Don't treat `casd_llm` results as
-difficulty-calibrated until that's done.
+**Thresholds are calibrated.** Four difficulty levels
+(`configs/thresholds.json["casd_llm"]`, selectable via `--threshold_pct
+1|2|3|4`) were hand-picked from a real 1000-sample calibration run under the
+current neighborhood-evaluation protocol — see `ContextAwareSafeDecoding`'s
+"Difficulty levels" docstring section and
+[`contexts/llm_application.md`](contexts/llm_application.md) Part 5 for the
+full grid and rationale. `configs/casd_llm.yaml` uses the default, Level 3
+("Moderate"). Recalibrate (`itcas/pipeline/calibrate_casd.py`) if the
+neighborhood-evaluation protocol, target model, or judge models change.
 
 ## Cluster (Slurm) submission
 

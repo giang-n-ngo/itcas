@@ -42,6 +42,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings as _warnings
 from typing import Optional
 
 
@@ -105,7 +106,20 @@ def evaluate_batch(
     url = f"{base_url.rstrip('/')}/evaluate"
     try:
         resp = _http_post_json(url, items, timeout=timeout)
-    except Exception:
+    except Exception as e:
+        # Logged (not silently swallowed) so a whole-batch failure -- e.g. a
+        # non-2xx HTTP response body carrying a server-side traceback, or a
+        # timeout -- leaves a trace to diagnose from, instead of looking
+        # identical to every other None-row cause once it reaches the
+        # worst-case-penalty fallback in ContextAwareSafeDecoding.evaluate_true.
+        detail = getattr(e, "read", None)
+        body = detail().decode("utf-8", "replace")[:2000] if callable(detail) else ""
+        _warnings.warn(
+            f"[casd_client] evaluate_batch POST {url} failed for a batch of "
+            f"{len(items)} items: {e!r}{(' body=' + body) if body else ''}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return [None] * len(items)
     if not isinstance(resp, list) or len(resp) != len(items):
         return [None] * len(items)

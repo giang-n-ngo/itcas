@@ -7,10 +7,14 @@
 # (or CASD_MOCK=1); real runs need the server started with real vLLM +
 # judge models loaded on a GPU node.
 #
-# Thresholds (tau_safety=0.5, tau_utility=0.0) are PLACEHOLDERS -- see
-# ContextAwareSafeDecoding's docstring in itcas/pipeline/problems.py for why
-# the generic 200k-MC calibrate_thresholds() recipe isn't usable here; a
-# dedicated (small-N or offline) calibration is a follow-up open item.
+# No `thresholds:` key here -- this uses ContextAwareSafeDecoding's default,
+# Level 3 ("Moderate", tau_safety=0.970, tau_utility=-2.30, ~12.8% jointly
+# feasible), calibrated against 1000 real neighborhood-evaluation samples.
+# See that class's docstring ("Difficulty levels") and
+# configs/thresholds.json["casd_llm"] for all four calibrated levels
+# (selectable via `--threshold_pct 1|2|3|4`); the generic 200k-MC
+# calibrate_thresholds() recipe isn't usable here (see docstring for why),
+# so itcas/pipeline/calibrate_casd.py is the dedicated replacement.
 #
 # batch_size=8: amortizes the HTTP round-trip to the CASD server and gives
 # vLLM's continuous batching engine enough concurrent sequences per call to

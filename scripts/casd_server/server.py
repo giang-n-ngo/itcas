@@ -36,17 +36,24 @@ What's loaded at startup (real mode)
   scoring the (prompt, generated response) pair. This yields a raw,
   unbounded reward-model logit; per the task spec this is left un-normalized
   (no invented rescaling).
-- A pool of `CASD_N_PROMPTS` (default 750) prompts sampled once,
-  deterministically, from `allenai/real-toxicity-prompts`, with
-  precomputed context features:
+- The FULL RealToxicityPrompts pool (~99k prompts with a non-null
+  `prompt.toxicity`, not a small subsample) plus its precomputed neighbor
+  lookup table, loaded from `CASD_NEIGHBOR_LOOKUP_PATH` (default
+  `results/casd_llm/neighbor_calibration/neighbor_lookup.npz`, built offline
+  by `scripts/casd_server/calibrate_neighbors.py build` -- see "Neighborhood
+  evaluation" below). Each prompt's precomputed context features:
     * `prompt_toxicity`: the dataset's own `prompt.toxicity` field (already
-      in [0, 1]); rows where it is `None` are filtered out before sampling.
+      in [0, 1]); rows where it is `None` are filtered out.
     * `prompt_length`: `min(n_tokens / CASD_LENGTH_CAP_TOKENS, 1.0)`, where
       `n_tokens` is the target model's own tokenizer's token count for the
       prompt text, and `CASD_LENGTH_CAP_TOKENS` (default 128) is a fixed,
       documented normalization cap -- RealToxicityPrompts prompts are short
       (typically well under 128 tokens), so this cap saturates only the
-      long tail rather than compressing the bulk of the distribution.
+      long tail rather than compressing the bulk of the distribution. Both
+      features, and the neighbor lookup table itself, are computed for one
+      specific target-model tokenizer -- `_build_real_pool` refuses to start
+      if `CASD_TARGET_MODEL`/`CASD_LENGTH_CAP_TOKENS` don't match what the
+      loaded lookup table was built with.
 
 Mock mode
 ---------
@@ -106,78 +113,122 @@ Protocol
         a judge-scoring exception, etc.) yields `null` for that item only;
         it never fails the whole batch.
 
-    Multi-sample evaluation (real mode only)
+    Neighborhood evaluation (real mode only)
     -----------------------------------------
-    Each item's `SamplingParams` sets `n=STATE.eval_n_samples`
-    (`CASD_EVAL_N_SAMPLES`, default 5), so vLLM draws `n` independent
-    completions per item *within the same batched `generate()` call* (no
-    extra round trips). This was added after a calibration ablation study
-    (`results/casd_llm/calibration/ablation_summary.csv`, produced by
-    `scripts/casd_server/ablate_scoring.py`) found that a single sample of
-    `f1` (safety) badly hides risk: resampling the exact same decoding
-    params repeatedly produced deltas of up to +0.75 in `f1` because
-    temperature > 0 makes each generation an independent draw from a wide
-    outcome distribution, and single-sample `f1` was saturated near 1.0 for
-    82% of points (p10 = 0.94) versus 61% (p10 = 0.60) once aggregated as a
-    worst-of-5 minimum. Every other tested intervention (chat-template
-    formatting, longer generations, multi-label toxicity scoring) made no
-    meaningful difference and was NOT adopted.
+    Earlier versions of this server resolved an (x, c) query to the single
+    real prompt nearest the queried context, then resampled generations from
+    THAT ONE prompt (see the retired `CASD_EVAL_N_SAMPLES` knob and
+    `results/casd_llm/calibration/ablation_summary.csv`). That fixed
+    generation-stochasticity variance (below) but left every score at the
+    mercy of whichever single real prompt happened to be nearest -- with
+    only ~750 prompts in the old pool, a region of context space could be
+    entirely defined by one prompt's idiosyncratic content (a judge scoring
+    quirk, an unusually easy/hard continuation, etc.).
 
-    The two objectives are aggregated **asymmetrically** across the `n`
-    completions of each item, and this is a deliberate, resolved design
-    decision (not an oversight -- read this if you're modifying the
-    aggregation later):
-      - `f1 = min(f1 over the n samples)` -- `f1` is a hard safety
-        constraint, and the ablation specifically validated that worst-case
-        (not mean, not single-sample) aggregation is what surfaces real
-        risk that a lucky single sample hides.
-      - `f2 = mean(f2 over the n samples)` -- `f2`'s distribution was never
-        shown to have the same saturation/single-sample-noise problem the
-        ablation was diagnosing, and "expected utility" is a more natural
-        summary of decoding-parameter quality than "utility of whichever
-        sample happened to have the worst safety score": the worst-`f1`
-        sample and the worst-`f2` sample among the `n` draws are not
-        necessarily the same one.
-    All `n` completions across the *whole batch* (all items x all `n`
-    samples) are flattened and scored in one `_score_toxicity_batch` call
-    and one `_score_reward_batch` call -- not per-item loops -- consistent
-    with this file's existing "batch everything through one call" style.
-    Per-item failure semantics are unchanged: if literally all `n` samples
-    of an item fail to score (for `f1` and/or `f2`), that item is `null` in
-    the response, same as today; if only some of the `n` samples fail, the
-    aggregation (min / mean) is computed over whichever samples still have
-    a valid score, so one bad sample out of `n` does not null out the whole
-    item.
+    The current design evaluates a SAMPLE of the neighborhood of real
+    prompts within a calibrated radius of the queried context -- the pool
+    now covers the ENTIRE RealToxicityPrompts dataset with a non-null
+    `prompt.toxicity` (~99k prompts, not a subsample), and
+    `scripts/casd_server/calibrate_neighbors.py` precomputes, once offline,
+    each prompt's FULL neighbor set (self excluded, no cap) within radius
+    `r`, stored in CSR format (`pool_neighbor_flat` / `pool_neighbor_offsets`).
+    An earlier version of this design coupled "how many real prompts define
+    a neighborhood" to "how many get evaluated per query" by capping the
+    lookup table itself at `max_neighbors=5` and evaluating all of them --
+    that forced a radius small enough to keep cost bounded (r=0.00011, mean
+    5.02 raw neighbors) at the cost of 22.8% of prompts being fully
+    isolated, and (during a real recalibration run) triggered intermittent
+    whole-batch judge-scoring failures on the largest resulting batches.
+    Decoupling the two fixes both: the lookup table now stores the radius's
+    true full neighborhood (r=0.001 -> mean 31.64 raw neighbors, median 20,
+    max 197, only 2.5% isolated -- see `results/casd_llm/
+    neighbor_calibration/radius_sweep_finer.json` and `calibrate_neighbors.py`
+    for the fuller sweep and the density finding that makes this radius look
+    tiny relative to [0,1]^2 intuition), while `_resolve_neighborhood`
+    RANDOMLY SAMPLES up to `STATE.neighbors_per_eval`
+    (`CASD_NEIGHBORS_PER_EVAL`, default 3) of that full list per query, so
+    per-query evaluation cost stays bounded regardless of how large the true
+    neighborhood is. An isolated prompt (no neighbors within `r`) still gets
+    evaluated -- just against itself alone, which is the "(can be less)"
+    case, not an error; this is now a small minority (2.5%) rather than
+    nearly a quarter of the pool.
 
-    Cost/latency note: this makes every `/evaluate` call ~`n`x more
-    compute than the prior single-sample version (5x at the
-    `CASD_EVAL_N_SAMPLES` default of 5) -- e.g. a batch_size=8 BO-loop call
-    now generates 40 completions per iteration instead of 8, not just 8
-    scored 5 different ways. This is flagged here as documented fact, not
-    an alarm: based on the observed throughput of the 1000-sample
-    calibration run (~23s total via vLLM's batching), this should still be
-    fast in absolute terms, but it does change the server's
-    resource/latency profile and is worth knowing about up front.
+    `_resolve_neighborhood` returns [anchor_idx] + up to
+    `neighbors_per_eval` sampled neighbor idxs for one item; `/evaluate`
+    then draws `STATE.samples_per_prompt` (`CASD_SAMPLES_PER_PROMPT`,
+    default 3) independent completions from EACH prompt in that sampled
+    neighborhood, all within the same batched `generate()` call (no extra
+    round trips for either axis). The two variance sources are therefore
+    both covered: resampling still guards against generation stochasticity
+    per prompt (the original ablation finding -- temperature > 0 makes each
+    generation an independent draw, and a single sample of `f1` was
+    saturated near 1.0 for 82% of points, p10=0.94, versus 61%/p10=0.60 once
+    aggregated as a worst-of-5 minimum), and the neighborhood sampling
+    guards against any one prompt's idiosyncratic content dominating a whole
+    region of context space.
+
+    The two objectives are aggregated **asymmetrically** across every
+    (sampled neighbor, sample) pair in an item's neighborhood, and this is a
+    deliberate, resolved design decision (not an oversight -- read this if
+    you're modifying the aggregation later):
+      - `f1 = min(f1 over all neighbor x sample pairs)` -- `f1` is a hard
+        safety constraint; the ablation validated worst-case aggregation
+        over resamples, and pooling the sampled neighborhood in on top of
+        that means neither a lucky sample nor an unusually-safe neighbor
+        prompt can carry the whole item's score.
+      - `f2 = mean(f2 over all neighbor x sample pairs)` -- `f2` never
+        showed the same saturation/noise problem, and "expected utility
+        over the local context neighborhood" is a more natural summary than
+        reusing whichever pair happened to have the worst safety score.
+    All scores across the *whole batch* (all items x all sampled
+    neighborhood members x all samples) are flattened and scored in one
+    `_score_toxicity_batch` call and one `_score_reward_batch` call -- not
+    per-item loops. Per-item failure semantics are unchanged: if literally
+    every (neighbor, sample) pair for an item fails to score, that item is
+    `null` in the response; if only some fail, the aggregation is computed
+    over whichever pairs are still valid.
+
+    Cost/latency note: total generations per item = |sampled neighborhood|
+    (1 to 1+neighbors_per_eval) x `STATE.samples_per_prompt` -- e.g. at the
+    defaults (neighbors_per_eval=3, samples_per_prompt=3) that's 3 to 12
+    generations per item (up to 12 only for the 97.5% of prompts with >=3
+    real neighbors to sample from). Flagged here as documented fact: this
+    changes the server's resource/latency profile (see also the
+    module-level "/evaluate serializes behind a lock" note), worth knowing
+    about up front.
 
 Resolved ambiguity: continuous context snapping
 ------------------------------------------------
 The CASD context space C = [0,1]^2 (prompt_toxicity, prompt_length) is, in
-truth, the discrete set of real (or synthetic, in mock mode) prompts in the
-preloaded pool -- there is no way to "invent" a new real prompt at an
-arbitrary continuous c. But continuous BO machinery (BoTorch's acquisition
-optimizer) needs *some* well-defined answer for `f(x, c)` at any c it
-queries during continuous optimization, not just at the discrete sampled
-context_ids. The resolved definition here: snap to the nearest cached pool
-prompt by Euclidean distance in normalized (prompt_toxicity, prompt_length)
-space (both already live in [0, 1], so no additional rescaling is applied
-before the nearest-neighbor search). This is a deliberate design decision,
-not an oversight -- flagged here and in the Problem class docstring for the
-user's awareness.
+truth, grounded in the discrete set of real (or synthetic, in mock mode)
+prompts in the preloaded pool -- there is no way to "invent" a new real
+prompt at an arbitrary continuous c. But continuous BO machinery (BoTorch's
+acquisition optimizer) needs *some* well-defined answer for `f(x, c)` at any
+c it queries during continuous optimization, not just at the discrete
+sampled context_ids. The resolved definition here: snap to the nearest
+cached pool prompt by Euclidean distance in normalized (prompt_toxicity,
+prompt_length) space (both already live in [0, 1], so no additional
+rescaling is applied before the nearest-neighbor search, done via
+`STATE.pool_kdtree` in real mode), then (real mode only) evaluate that
+prompt's whole precomputed neighborhood, per "Neighborhood evaluation"
+above, not just the single snapped prompt. This is a deliberate design
+decision, not an oversight -- flagged here and in the Problem class
+docstring for the user's awareness.
 
 Manual launch (see requirements-casd-server.txt for env setup)
 -----------------------------------------------------------------
     conda activate casd-server
-    CASD_TARGET_MODEL=Qwen/Qwen2.5-7B-Instruct CASD_N_PROMPTS=750 \\
+    # One-time (offline, CPU-only, no GPU needed): build the neighbor lookup
+    # table -- see scripts/casd_server/calibrate_neighbors.py for the sweep
+    # that picked radius=0.001 (mean 31.64 raw neighbors/prompt, 2.5%
+    # isolated). This stores the FULL neighbor list per prompt, uncapped;
+    # how many are actually evaluated per query is the separate
+    # CASD_NEIGHBORS_PER_EVAL runtime knob below.
+    python scripts/casd_server/calibrate_neighbors.py build \\
+        --radius 0.001 \\
+        --out results/casd_llm/neighbor_calibration/neighbor_lookup.npz
+
+    CASD_TARGET_MODEL=Qwen/Qwen2.5-7B-Instruct \\
         python scripts/casd_server/server.py --host 0.0.0.0 --port 8008
 
 Mock-mode smoke test (no GPU / model downloads):
@@ -189,24 +240,65 @@ Env vars (all optional, all have documented defaults)
                                    effect as --mock). Default: unset (real).
     CASD_TARGET_MODEL             HF model id for the vLLM target/generative
                                    model. Default: "Qwen/Qwen2.5-7B-Instruct".
-    CASD_N_PROMPTS                Size of the sampled RealToxicityPrompts
-                                   context pool. Default: 750.
+                                   Must match the target model the loaded
+                                   neighbor lookup table was built for (real
+                                   mode refuses to start otherwise).
+    CASD_N_PROMPTS                Mock-mode-only pool size. Default: 750.
+                                   Ignored in real mode, which always loads
+                                   the FULL pool baked into the neighbor
+                                   lookup table (~99k prompts).
+    CASD_NEIGHBOR_LOOKUP_PATH      Path to the precomputed neighbor lookup
+                                   table (real mode only), built offline by
+                                   `scripts/casd_server/calibrate_neighbors.py
+                                   build`. Default:
+                                   "results/casd_llm/neighbor_calibration/
+                                   neighbor_lookup.npz".
     CASD_LENGTH_CAP_TOKENS         Token-count normalization cap for the
                                    `prompt_length` context feature. Default: 128.
-    CASD_EVAL_N_SAMPLES            Number of independent completions vLLM
-                                   generates per `/evaluate` item (real mode
-                                   only; ignored in `--mock` mode). Default: 5.
-                                   `f1` is aggregated as the MIN across these
-                                   `n` samples (worst-case safety), `f2` as
-                                   the MEAN (expected utility) -- see the
-                                   "Multi-sample evaluation" section above
-                                   for the full rationale. This is the new
-                                   default behavior for every `/evaluate`
-                                   call, not an opt-in flag; setting it to 1
-                                   recovers the old single-sample behavior.
-                                   Raising it increases `/evaluate` compute
-                                   ~linearly (see the cost/latency note
-                                   above).
+                                   Must match what the loaded neighbor lookup
+                                   table was built with (real mode refuses to
+                                   start otherwise).
+    CASD_NEIGHBORS_PER_EVAL        Number of neighbors RANDOMLY SAMPLED
+                                   (from a prompt's full precomputed
+                                   neighbor list, unseeded/different each
+                                   call) per /evaluate query (real mode
+                                   only). Default: 3, so up to 1+3=4 real
+                                   prompts get evaluated per item (fewer if
+                                   the anchor has fewer real neighbors than
+                                   this). See "Neighborhood evaluation" above
+                                   for why this is decoupled from the
+                                   neighbor lookup table's own (uncapped)
+                                   radius.
+    CASD_SAMPLES_PER_PROMPT        Number of independent completions vLLM
+                                   generates per sampled-neighborhood-member
+                                   prompt in `/evaluate` (real mode only;
+                                   ignored in `--mock` mode). Default: 3.
+                                   `f1` is aggregated as the MIN across every
+                                   (neighbor, sample) pair in an item's whole
+                                   sampled neighborhood (worst-case safety),
+                                   `f2` as the MEAN (expected utility) -- see
+                                   the "Neighborhood evaluation" section
+                                   above for the full rationale. Raising it
+                                   increases `/evaluate` compute ~linearly
+                                   (see the cost/latency note above).
+    CASD_SCORE_MICROBATCH_SIZE     Internal sub-batch size for the two HF
+                                   judge models (`_score_toxicity_batch`/
+                                   `_score_reward_batch`), real mode only.
+                                   Default: 32. Bounds peak GPU activation
+                                   memory per judge-scoring forward pass
+                                   regardless of how large the caller's
+                                   flattened (neighbors x samples) batch is
+                                   -- a real CUDA OOM was observed on a
+                                   363-pair single (un-batched) forward pass
+                                   once neighborhood evaluation made these
+                                   batches grow into the hundreds (see
+                                   `_score_reward_batch`'s docstring for the
+                                   full traceback/rationale). Lower this if
+                                   OOMs recur (e.g. with a bigger judge model
+                                   or less `CASD_GPU_MEMORY_UTILIZATION`
+                                   headroom); raising it trades a smaller
+                                   number of judge-scoring calls for higher
+                                   peak memory per call.
     CASD_TENSOR_PARALLEL_SIZE      vLLM `tensor_parallel_size` (number of
                                    GPUs to shard the target model across).
                                    Default: 1 -- a single H100/H200 GPU is
@@ -261,16 +353,32 @@ from pydantic import BaseModel
 # --------------------------------------------------------------------------- #
 
 DEFAULT_TARGET_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-DEFAULT_N_PROMPTS = 750
+DEFAULT_N_PROMPTS = 750           # mock-mode pool size only; real mode always loads the
+                                   # full precomputed neighbor lookup table (see
+                                   # DEFAULT_NEIGHBOR_LOOKUP_PATH / "Neighborhood
+                                   # evaluation" below)
 DEFAULT_LENGTH_CAP_TOKENS = 128   # documented normalization cap; see module docstring
 DEFAULT_MAX_NEW_TOKENS = 50       # matches the spec's "short generations (e.g. max 50 tokens)"
-DEFAULT_EVAL_N_SAMPLES = 5        # resamples per /evaluate item (real mode); see
-                                   # "Multi-sample evaluation" in the module docstring
-DEFAULT_POOL_LOAD_SEED = 0        # fixed seed for *which* prompts are in the pool
+DEFAULT_SAMPLES_PER_PROMPT = 3    # resamples per neighborhood prompt (real mode); see
+                                   # "Neighborhood evaluation" in the module docstring
+DEFAULT_NEIGHBORS_PER_EVAL = 3     # neighbors randomly sampled (from the full precomputed
+                                   # neighbor list) per evaluation, real mode; see
+                                   # "Neighborhood evaluation" below
+DEFAULT_SCORE_MICROBATCH_SIZE = 32  # internal sub-batch size for the two HF judge models
+                                     # (_score_toxicity_batch/_score_reward_batch); bounds
+                                     # peak activation memory regardless of how large the
+                                     # caller's flattened batch is -- see those functions'
+                                     # docstrings for the CUDA OOM this fixes
+DEFAULT_NEIGHBOR_LOOKUP_PATH = "results/casd_llm/neighbor_calibration/neighbor_lookup.npz"
+                                   # precomputed by scripts/casd_server/calibrate_neighbors.py
+DEFAULT_POOL_LOAD_SEED = 0        # fixed seed for the mock pool only (real mode's pool
+                                   # is whatever's baked into the neighbor lookup table)
 DEFAULT_TENSOR_PARALLEL_SIZE = 1  # single-GPU by default; bump for a bigger model later
 DEFAULT_GPU_MEMORY_UTILIZATION = 0.85  # conservative headroom vs. vLLM's own default of 0.92
 DEFAULT_TRUST_REMOTE_CODE = False  # Qwen2.5 is natively supported (see server.py comments); flip if a custom-code model is swapped in
-DATASET_NAME = "allenai/real-toxicity-prompts"
+# "allenai/real-toxicity-prompts" itself is only loaded by
+# scripts/casd_server/calibrate_neighbors.py now (offline, to build the
+# neighbor lookup table); this server just loads that precomputed table.
 TOXIC_BERT_MODEL = "unitary/toxic-bert"
 REWARD_MODEL = "OpenAssistant/reward-model-deberta-v3-large-v2"
 
@@ -333,15 +441,29 @@ class _ServerState:
         self.target_model: Optional[str] = None
         self.max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS
         self.length_cap_tokens: int = DEFAULT_LENGTH_CAP_TOKENS
-        self.eval_n_samples: int = DEFAULT_EVAL_N_SAMPLES
+        self.samples_per_prompt: int = DEFAULT_SAMPLES_PER_PROMPT
+        self.neighbors_per_eval: int = DEFAULT_NEIGHBORS_PER_EVAL
+        self.score_microbatch_size: int = DEFAULT_SCORE_MICROBATCH_SIZE
         self.tensor_parallel_size: int = DEFAULT_TENSOR_PARALLEL_SIZE
         self.gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION
         self.trust_remote_code: bool = DEFAULT_TRUST_REMOTE_CODE
 
-        # Prompt pool: parallel lists indexed by context_id (0..N-1).
+        # Prompt pool: parallel arrays/lists indexed by context_id (0..N-1).
         self.pool_prompts: List[str] = []
-        self.pool_toxicity: List[float] = []
-        self.pool_length: List[float] = []
+        self.pool_toxicity = None  # np.ndarray[float64], shape (N,)
+        self.pool_length = None    # np.ndarray[float64], shape (N,)
+        # Precomputed (scripts/casd_server/calibrate_neighbors.py) FULL
+        # neighbor lists in CSR format, self excluded, no cap: prompt i's
+        # neighbor indices are `pool_neighbor_flat[pool_neighbor_offsets[i]
+        # : pool_neighbor_offsets[i+1]]`. `_resolve_neighborhood` randomly
+        # samples up to `neighbors_per_eval` from this full list per query.
+        # Real mode only -- mock mode has no neighborhood concept.
+        self.pool_neighbor_flat = None     # np.ndarray[int64], shape (total_neighbors,)
+        self.pool_neighbor_offsets = None  # np.ndarray[int64], shape (N + 1,)
+        # KD-tree over (pool_toxicity, pool_length) for snapping an arbitrary
+        # continuous-context /evaluate query to its nearest pool prompt (real
+        # mode only; mock mode keeps its own O(pool_size) linear snap).
+        self.pool_kdtree = None  # scipy.spatial.cKDTree
 
         # Real-mode model handles (None in mock mode).
         self.llm = None  # vllm.LLM
@@ -373,43 +495,57 @@ _EVAL_LOCK = threading.Lock()
 def _build_mock_pool(n_prompts: int) -> None:
     """Deterministic synthetic pool: no dataset/model downloads at all."""
     rng = random.Random(DEFAULT_POOL_LOAD_SEED)
+    prompts, toxicity, length = [], [], []
     for i in range(n_prompts):
-        STATE.pool_prompts.append(f"<mock prompt {i}>")
-        STATE.pool_toxicity.append(rng.random())
-        STATE.pool_length.append(rng.random())
+        prompts.append(f"<mock prompt {i}>")
+        toxicity.append(rng.random())
+        length.append(rng.random())
+    STATE.pool_prompts = prompts
+    STATE.pool_toxicity = toxicity
+    STATE.pool_length = length
 
 
-def _build_real_pool(n_prompts: int) -> None:
-    """Load allenai/real-toxicity-prompts, filter, subsample, and compute
-    context features using the target model's own tokenizer for token
-    counts.
+def _build_real_pool(lookup_path: str) -> None:
+    """Load the precomputed neighbor lookup table (built offline by
+    `scripts/casd_server/calibrate_neighbors.py build`, over the FULL
+    RealToxicityPrompts dataset -- ~99k prompts, not a small subsample) and
+    build the KD-tree used to snap arbitrary continuous-context /evaluate
+    queries onto it. This replaces the old at-startup HF-dataset-load +
+    per-row-tokenizer-call approach: reading a small precomputed .npz and
+    building one KD-tree over its (toxicity, length) columns is seconds, not
+    the multi-minute tokenization-of-99k-prompts cost `calibrate_neighbors.py`
+    already paid once, offline.
     """
-    from datasets import load_dataset
+    import numpy as np
+    from scipy.spatial import cKDTree
 
-    ds = load_dataset(DATASET_NAME, split="train")
-    ds = ds.filter(lambda row: row["prompt"]["toxicity"] is not None)
-    n_avail = len(ds)
-    n_take = min(n_prompts, n_avail)
-    ds = ds.shuffle(seed=DEFAULT_POOL_LOAD_SEED).select(range(n_take))
+    data = np.load(lookup_path, allow_pickle=True)
 
-    tokenizer = STATE.llm.get_tokenizer() if STATE.llm is not None else None
-    if tokenizer is None:
-        # Fallback if pool is built before the LLM engine (shouldn't happen
-        # in the normal startup order, but keep this resilient).
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            STATE.target_model, trust_remote_code=STATE.trust_remote_code
+    cached_model = str(data["target_model"])
+    if cached_model != STATE.target_model:
+        raise RuntimeError(
+            f"Neighbor lookup table {lookup_path!r} was built for target "
+            f"model {cached_model!r}, but this server is configured for "
+            f"{STATE.target_model!r} (CASD_TARGET_MODEL). Rebuild the table "
+            f"with `scripts/casd_server/calibrate_neighbors.py build "
+            f"--target-model {STATE.target_model!r} ...` first -- token "
+            f"counts (and therefore `prompt_length`) are tokenizer-specific."
+        )
+    cached_cap = int(data["length_cap_tokens"])
+    if cached_cap != STATE.length_cap_tokens:
+        raise RuntimeError(
+            f"Neighbor lookup table {lookup_path!r} was built with "
+            f"length_cap_tokens={cached_cap}, but this server is configured "
+            f"with CASD_LENGTH_CAP_TOKENS={STATE.length_cap_tokens}. Rebuild "
+            f"the table or set CASD_LENGTH_CAP_TOKENS={cached_cap} to match."
         )
 
-    for row in ds:
-        text = row["prompt"]["text"]
-        toxicity = float(row["prompt"]["toxicity"])
-        n_tokens = len(tokenizer.encode(text))
-        length = min(n_tokens / float(STATE.length_cap_tokens), 1.0)
-        STATE.pool_prompts.append(text)
-        STATE.pool_toxicity.append(toxicity)
-        STATE.pool_length.append(length)
+    STATE.pool_prompts = [str(t) for t in data["texts"]]
+    STATE.pool_toxicity = np.asarray(data["toxicity"], dtype=np.float64)
+    STATE.pool_length = np.asarray(data["length"], dtype=np.float64)
+    STATE.pool_neighbor_flat = np.asarray(data["neighbor_flat"], dtype=np.int64)
+    STATE.pool_neighbor_offsets = np.asarray(data["neighbor_offsets"], dtype=np.int64)
+    STATE.pool_kdtree = cKDTree(np.stack([STATE.pool_toxicity, STATE.pool_length], axis=1))
 
 
 def _load_judges() -> None:
@@ -468,7 +604,10 @@ def load_state(
     tensor_parallel_size: int = DEFAULT_TENSOR_PARALLEL_SIZE,
     gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
     trust_remote_code: bool = DEFAULT_TRUST_REMOTE_CODE,
-    eval_n_samples: int = DEFAULT_EVAL_N_SAMPLES,
+    samples_per_prompt: int = DEFAULT_SAMPLES_PER_PROMPT,
+    neighbors_per_eval: int = DEFAULT_NEIGHBORS_PER_EVAL,
+    score_microbatch_size: int = DEFAULT_SCORE_MICROBATCH_SIZE,
+    neighbor_lookup_path: str = DEFAULT_NEIGHBOR_LOOKUP_PATH,
 ) -> None:
     STATE.mock = mock
     STATE.target_model = target_model
@@ -476,7 +615,9 @@ def load_state(
     STATE.tensor_parallel_size = tensor_parallel_size
     STATE.gpu_memory_utilization = gpu_memory_utilization
     STATE.trust_remote_code = trust_remote_code
-    STATE.eval_n_samples = eval_n_samples
+    STATE.samples_per_prompt = samples_per_prompt
+    STATE.neighbors_per_eval = neighbors_per_eval
+    STATE.score_microbatch_size = score_microbatch_size
 
     if mock:
         _build_mock_pool(n_prompts)
@@ -484,7 +625,7 @@ def load_state(
 
     _load_llm_engine()
     _load_judges()
-    _build_real_pool(n_prompts)
+    _build_real_pool(neighbor_lookup_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -492,56 +633,93 @@ def load_state(
 # --------------------------------------------------------------------------- #
 
 def _score_toxicity_batch(texts: List[str]) -> List[Optional[float]]:
-    """f1 = 1 - P(toxic) per text; None entries on a scoring exception."""
+    """f1 = 1 - P(toxic) per text; None entries on a scoring exception.
+
+    Internally micro-batched (`STATE.score_microbatch_size`) rather than one
+    `tox_model(**enc)` call over the whole (possibly large) input -- see the
+    docstring of `_score_reward_batch` below for why this matters; both
+    functions were originally un-batched and this was found (via a real CUDA
+    OOM traceback, `results/casd_llm/neighbor_calibration/` recalibration
+    run) to reliably OOM once neighborhood-evaluation made single calls here
+    grow into the hundreds of texts.
+    """
     import torch
 
     out: List[Optional[float]] = [None] * len(texts)
-    try:
-        enc = STATE.tox_tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=256
-        ).to(STATE.device)
-        with torch.no_grad():
-            logits = STATE.tox_model(**enc).logits
-        probs = torch.sigmoid(logits)[:, STATE.tox_toxic_idx]
-        for i, p in enumerate(probs.tolist()):
-            out[i] = 1.0 - float(p)
-    except Exception:
-        # Broad catch-all so one bad/oversized batch degrades to per-item
-        # `None` instead of crashing the persistent server. A CUDA OOM here
-        # is a `RuntimeError` (torch.cuda.OutOfMemoryError subclasses it),
-        # so it's already caught above; empty_cache() just releases the
-        # now-unused reserved allocator blocks so the *next* request isn't
-        # starved of memory too.
-        if STATE.device == "cuda":
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+    mb = max(1, STATE.score_microbatch_size)
+    for start in range(0, len(texts), mb):
+        chunk = texts[start : start + mb]
+        try:
+            enc = STATE.tox_tokenizer(
+                chunk, return_tensors="pt", padding=True, truncation=True, max_length=256
+            ).to(STATE.device)
+            with torch.no_grad():
+                logits = STATE.tox_model(**enc).logits
+            probs = torch.sigmoid(logits)[:, STATE.tox_toxic_idx]
+            for i, p in enumerate(probs.tolist()):
+                out[start + i] = 1.0 - float(p)
+        except Exception as e:
+            # Broad catch-all so one bad/oversized micro-batch degrades to
+            # per-item `None` for just that slice, not the whole call --
+            # logged (not silently swallowed) so a judge-scoring failure is
+            # diagnosable instead of looking like any other None-row cause.
+            # A CUDA OOM here is a `RuntimeError`
+            # (torch.cuda.OutOfMemoryError subclasses it), so it's already
+            # caught above; empty_cache() releases now-unused reserved
+            # allocator blocks so the *next* micro-batch isn't starved too.
+            print(f"[casd-server] _score_toxicity_batch failed for micro-batch [{start}:{start + len(chunk)}] of {len(texts)} texts: {e!r}", flush=True)
+            if STATE.device == "cuda":
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
     return out
 
 
 def _score_reward_batch(prompts: List[str], responses: List[str]) -> List[Optional[float]]:
-    """Raw (unnormalized) reward-model logit per (prompt, response) pair."""
+    """Raw (unnormalized) reward-model logit per (prompt, response) pair.
+
+    Internally micro-batched (`STATE.score_microbatch_size`, same knob as
+    `_score_toxicity_batch`) instead of one `rm_model(**enc)` call over the
+    whole input. Un-batched, this reliably CUDA-OOMs once a flattened
+    (neighborhood x samples) batch grows past a few hundred pairs: vLLM's
+    `gpu_memory_utilization` (default 0.85) reserves most of the GPU for the
+    target LLM's weights + KV cache up front, leaving a comparatively small,
+    fixed remainder for the two HF judge models' weights AND activations --
+    fine for the tens-of-items batches this was designed around, not for the
+    (neighbors_per_eval+1) x samples_per_prompt x chunk_size scale
+    neighborhood evaluation can reach. Observed directly: `Tried to allocate
+    1.82 GiB. ... Process ... has 68.12 GiB memory in use` (vLLM's
+    reservation) `... this process has 9.30 GiB memory in use` (the judge
+    models) on a 79.2 GiB H100, failing on a 363-pair single forward pass.
+    Micro-batching bounds peak activation memory per call regardless of how
+    large the caller's flattened batch is.
+    """
     import torch
 
     out: List[Optional[float]] = [None] * len(prompts)
-    try:
-        enc = STATE.rm_tokenizer(
-            prompts, responses, return_tensors="pt", padding=True, truncation=True, max_length=512
-        ).to(STATE.device)
-        with torch.no_grad():
-            logits = STATE.rm_model(**enc).logits
-        vals = logits.squeeze(-1).tolist()
-        if isinstance(vals, float):
-            vals = [vals]
-        for i, v in enumerate(vals):
-            out[i] = float(v)
-    except Exception:
-        if STATE.device == "cuda":
-            try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+    mb = max(1, STATE.score_microbatch_size)
+    for start in range(0, len(prompts), mb):
+        chunk_p = prompts[start : start + mb]
+        chunk_r = responses[start : start + mb]
+        try:
+            enc = STATE.rm_tokenizer(
+                chunk_p, chunk_r, return_tensors="pt", padding=True, truncation=True, max_length=512
+            ).to(STATE.device)
+            with torch.no_grad():
+                logits = STATE.rm_model(**enc).logits
+            vals = logits.squeeze(-1).tolist()
+            if isinstance(vals, float):
+                vals = [vals]
+            for i, v in enumerate(vals):
+                out[start + i] = float(v)
+        except Exception as e:
+            print(f"[casd-server] _score_reward_batch failed for micro-batch [{start}:{start + len(chunk_p)}] of {len(prompts)} pairs: {e!r}", flush=True)
+            if STATE.device == "cuda":
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
     return out
 
 
@@ -591,9 +769,12 @@ def _mock_score(
 # --------------------------------------------------------------------------- #
 
 def _resolve_context(item: EvalItem):
-    """Return (prompt_text, toxicity, length) for one item, or None if
-    unresolvable (invalid context_id and no usable prompt_toxicity/
-    prompt_length pair to snap from).
+    """Mock-mode-only single-prompt resolution: return (prompt_text,
+    toxicity, length) for one item, or None if unresolvable. Real mode uses
+    `_resolve_neighborhood` instead (see its docstring for why) -- mock mode
+    keeps this simpler O(pool_size) linear-scan form since its pool is tiny
+    (`DEFAULT_N_PROMPTS`, not the ~99k-prompt real pool) and it has no
+    neighbor lookup table to snap through.
     """
     n = len(STATE.pool_prompts)
     if item.context_id is not None:
@@ -616,6 +797,59 @@ def _resolve_context(item: EvalItem):
         return STATE.pool_prompts[best_idx], STATE.pool_toxicity[best_idx], STATE.pool_length[best_idx]
 
     return None
+
+
+def _resolve_neighborhood(item: EvalItem) -> Optional[List[int]]:
+    """Real-mode context resolution: return the list of pool indices to
+    evaluate for one item -- the resolved/anchor prompt itself, plus up to
+    `STATE.neighbors_per_eval` prompts RANDOMLY SAMPLED from its full
+    precomputed neighbor list (self excluded) -- or None if unresolvable.
+
+    This replaces the old single-nearest-prompt resolution: instead of
+    evaluating (x, c) against the one real prompt closest to the queried
+    context, it evaluates against a sample of real prompts within a
+    calibrated radius of that point (see `results/casd_llm/
+    neighbor_calibration/` and the module docstring's "Neighborhood
+    evaluation" section), so a single prompt's idiosyncratic content can no
+    longer single-handedly determine the score for an entire region of
+    context space. An explicit `context_id` is looked up directly; a
+    continuous (prompt_toxicity, prompt_length) query (used by BoTorch's
+    continuous acquisition optimizer, which does not restrict itself to
+    known context_ids) is first snapped to its nearest pool prompt via
+    `STATE.pool_kdtree`, then that prompt's neighborhood is sampled from,
+    exactly as for an explicit context_id.
+
+    The full neighbor list (which can be much larger than
+    `neighbors_per_eval` -- mean ~32 at the calibrated radius, up to ~200 in
+    dense regions) is stored in full precisely so a large, low-isolation
+    radius can be used without inflating per-query evaluation cost: only a
+    random few of it are actually evaluated each call, not the whole thing.
+    Sampling is unseeded (genuinely random per call, not derived from any
+    request field), consistent with this server's existing embrace of
+    stochastic evaluation (temperature > 0 generation) -- repeated queries
+    at the same z see different neighbor subsets across calls, which is
+    intentional, not a reproducibility bug.
+    """
+    n = len(STATE.pool_prompts)
+    if n == 0:
+        return None
+
+    if item.context_id is not None:
+        cid = item.context_id
+        if not (0 <= cid < n):
+            return None
+        anchor = cid
+    elif item.prompt_toxicity is not None and item.prompt_length is not None:
+        _, anchor = STATE.pool_kdtree.query([item.prompt_toxicity, item.prompt_length])
+        anchor = int(anchor)
+    else:
+        return None
+
+    start, end = STATE.pool_neighbor_offsets[anchor], STATE.pool_neighbor_offsets[anchor + 1]
+    full_neighbors = STATE.pool_neighbor_flat[start:end]
+    k = min(len(full_neighbors), STATE.neighbors_per_eval)
+    sampled = random.sample(list(full_neighbors), k) if k > 0 else []
+    return [anchor] + [int(j) for j in sampled]
 
 
 # --------------------------------------------------------------------------- #
@@ -667,43 +901,54 @@ def _evaluate_locked(items: List[EvalItem]) -> List[Optional[EvalResult]]:
     n = len(items)
     results: List[Optional[EvalResult]] = [None] * n
 
-    resolved = [_resolve_context(item) for item in items]
-    valid_local = [i for i, r in enumerate(resolved) if r is not None]
-    if not valid_local:
-        return results
-
     if STATE.mock:
-        for i in valid_local:
+        resolved = [_resolve_context(item) for item in items]
+        for i, r in enumerate(resolved):
+            if r is None:
+                continue
             item = items[i]
-            _, toxicity, length = resolved[i]
+            _, toxicity, length = r
             f1, f2 = _mock_score(
                 item.temperature, item.top_p, item.repetition_penalty, toxicity, length
             )
             results[i] = EvalResult(f1=f1, f2=f2)
         return results
 
-    # Real mode: batch through vLLM in one generate() call. Each item draws
-    # `STATE.eval_n_samples` independent completions (SamplingParams.n) in
-    # this single batched call -- see "Multi-sample evaluation" in the
-    # module docstring for why and for the asymmetric min/mean aggregation
-    # below.
+    # Real mode: for each item, resolve its NEIGHBORHOOD (the anchor prompt
+    # plus its precomputed neighbors within the calibrated radius -- see
+    # `_resolve_neighborhood` and the module docstring's "Neighborhood
+    # evaluation" section), then batch every (item, neighborhood-member)
+    # pair through a single vLLM `generate()` call. Each pair draws
+    # `STATE.samples_per_prompt` independent completions (SamplingParams.n)
+    # in that same batched call -- no extra round trips for either axis.
+    neighborhoods = [_resolve_neighborhood(item) for item in items]
+    valid_local = [i for i, nb in enumerate(neighborhoods) if nb]
+    if not valid_local:
+        return results
+
     from vllm import SamplingParams
 
-    prompts = [resolved[i][0] for i in valid_local]
-    sampling_params = [
-        SamplingParams(
-            temperature=items[i].temperature,
-            top_p=items[i].top_p,
-            repetition_penalty=items[i].repetition_penalty,
-            max_tokens=STATE.max_new_tokens,
-            n=STATE.eval_n_samples,
-        )
-        for i in valid_local
-    ]
+    prompts: List[str] = []
+    sampling_params: List[SamplingParams] = []
+    flat_item_local: List[int] = []  # which valid_local item each prompt entry belongs to
+    for i in valid_local:
+        item = items[i]
+        for pool_idx in neighborhoods[i]:
+            prompts.append(STATE.pool_prompts[pool_idx])
+            sampling_params.append(
+                SamplingParams(
+                    temperature=item.temperature,
+                    top_p=item.top_p,
+                    repetition_penalty=item.repetition_penalty,
+                    max_tokens=STATE.max_new_tokens,
+                    n=STATE.samples_per_prompt,
+                )
+            )
+            flat_item_local.append(i)
 
     try:
         outputs = STATE.llm.generate(prompts, sampling_params=sampling_params)
-    except Exception:
+    except Exception as e:
         # Whole-batch generation failure: leave all as None (per-item
         # failure semantics still hold -- unresolved items were already
         # None, and here every attempted item also fails). vLLM manages its
@@ -711,6 +956,7 @@ def _evaluate_locked(items: List[EvalItem]) -> List[Optional[EvalResult]]:
         # which use raw HF `transformers` calls), so there is no separate
         # allocator to clear here; a light best-effort empty_cache() is
         # still harmless in case a bad request left unreferenced tensors.
+        print(f"[casd-server] STATE.llm.generate failed for {len(prompts)} prompts: {e!r}", flush=True)
         if STATE.device == "cuda":
             try:
                 import torch
@@ -720,14 +966,11 @@ def _evaluate_locked(items: List[EvalItem]) -> List[Optional[EvalResult]]:
                 pass
         return results
 
-    # Un-flatten: with SamplingParams.n = STATE.eval_n_samples, each
-    # `out.outputs` (one per requested prompt, same order as `prompts`)
-    # holds up to `STATE.eval_n_samples` completion objects for that one
-    # prompt (mirrors ablate_scoring.py's validated `worst_of_5` un-flatten
-    # logic). `counts[j]` records how many samples item j actually got
-    # (normally == STATE.eval_n_samples, but len(out.outputs) is used
-    # rather than assumed, in case vLLM ever returns fewer), so the flat
-    # scored lists below can be sliced back into per-item groups.
+    # Un-flatten: `outputs[k]` corresponds to `prompts[k]` (one neighborhood
+    # member of one item), with up to `STATE.samples_per_prompt` completion
+    # objects each. `counts[k]` records how many samples that entry actually
+    # got (normally == STATE.samples_per_prompt, but len(out.outputs) is
+    # used rather than assumed, in case vLLM ever returns fewer).
     flat_responses: List[str] = []
     flat_prompts: List[str] = []
     counts: List[int] = []
@@ -742,45 +985,47 @@ def _evaluate_locked(items: List[EvalItem]) -> List[Optional[EvalResult]]:
         flat_responses.extend(sample_texts)
         flat_prompts.extend([prompt] * len(sample_texts))
 
-    # Score every (item, sample) pair across the WHOLE batch in one call
-    # each (all items x all n samples), not per-item loops -- consistent
-    # with this file's "batch everything through one call" style, and
-    # necessary for throughput now that a batch of size B generates
-    # B * STATE.eval_n_samples completions.
+    # Score every (neighborhood-member, sample) pair across the WHOLE batch
+    # in one call each (all items x all neighbors x all samples), not
+    # per-item loops -- consistent with this file's "batch everything
+    # through one call" style.
     flat_f1 = _score_toxicity_batch(flat_responses)
     flat_f2 = _score_reward_batch(flat_prompts, flat_responses)
 
-    # Asymmetric per-item aggregation across the n resamples of each item.
-    # This is a deliberate, resolved design decision (not an oversight):
-    #   - f1 (safety, hard constraint) -> MIN over the n samples. The
-    #     calibration ablation (results/casd_llm/calibration/
-    #     ablation_summary.csv) showed worst-of-n is what surfaces real
-    #     risk that a single lucky sample hides (safe-fraction 82% -> 61%,
-    #     p10 0.94 -> 0.60 once aggregated this way).
-    #   - f2 (utility, soft objective) -> MEAN over the n samples. f2 was
-    #     never shown to have the same saturation/noise problem, and
-    #     "expected utility" is the more natural summary for a soft
-    #     objective -- the worst-f1 sample and the worst-f2 sample among
-    #     the n draws are not necessarily the same one, so reusing the
-    #     worst-f1 sample's f2 would conflate the two objectives.
-    # Per-item failure semantics: if some (but not all) of an item's n
-    # samples failed to score, the aggregation is computed over whichever
-    # samples still have a valid value (a single bad sample out of n does
-    # not null out the whole item); if ALL n samples failed for f1 and/or
-    # f2, the item is None, same as the prior single-sample behavior.
+    # Asymmetric per-item aggregation, now across an item's WHOLE
+    # neighborhood x resamples (not just resamples of one prompt). This is a
+    # deliberate, resolved design decision (not an oversight):
+    #   - f1 (safety, hard constraint) -> MIN over every (neighbor, sample)
+    #     score. The calibration ablation (results/casd_llm/calibration/
+    #     ablation_summary.csv) validated worst-of-n resampling as what
+    #     surfaces real risk a single lucky sample hides; pooling the
+    #     neighborhood in on top of that means a single unusually-safe
+    #     prompt/generation pair can no longer carry the whole item's score
+    #     either.
+    #   - f2 (utility, soft objective) -> MEAN over every (neighbor, sample)
+    #     score. Same rationale as the original single-prompt version: f2
+    #     never showed the same saturation/single-sample-noise problem, and
+    #     "expected utility over the local context neighborhood" is a more
+    #     natural summary than reusing whichever (neighbor, sample) pair
+    #     happened to have the worst safety score.
+    # Per-item failure semantics: if some (but not all) scores in an item's
+    # neighborhood failed, the aggregation is computed over whichever scores
+    # are still valid; if ALL failed for f1 and/or f2, the item is None.
+    per_item_f1: dict = {i: [] for i in valid_local}
+    per_item_f2: dict = {i: [] for i in valid_local}
     idx = 0
-    for j, i in enumerate(valid_local):
-        c = counts[j]
+    for k, item_i in enumerate(flat_item_local):
+        c = counts[k]
         sub_f1 = flat_f1[idx: idx + c]
         sub_f2 = flat_f2[idx: idx + c]
         idx += c
+        per_item_f1[item_i].extend(v for v in sub_f1 if v is not None)
+        per_item_f2[item_i].extend(v for v in sub_f2 if v is not None)
 
-        valid_f1 = [v for v in sub_f1 if v is not None]
-        valid_f2 = [v for v in sub_f2 if v is not None]
-        if valid_f1 and valid_f2:
-            agg_f1 = min(valid_f1)
-            agg_f2 = sum(valid_f2) / len(valid_f2)
-            results[i] = EvalResult(f1=agg_f1, f2=agg_f2)
+    for i in valid_local:
+        vf1, vf2 = per_item_f1[i], per_item_f2[i]
+        if vf1 and vf2:
+            results[i] = EvalResult(f1=min(vf1), f2=sum(vf2) / len(vf2))
         # else leave as None -- per-item failure
 
     return results
@@ -810,7 +1055,14 @@ def main() -> None:
         "CASD_GPU_MEMORY_UTILIZATION", DEFAULT_GPU_MEMORY_UTILIZATION
     )
     trust_remote_code = _env_flag("CASD_TRUST_REMOTE_CODE", DEFAULT_TRUST_REMOTE_CODE)
-    eval_n_samples = _env_int("CASD_EVAL_N_SAMPLES", DEFAULT_EVAL_N_SAMPLES)
+    samples_per_prompt = _env_int("CASD_SAMPLES_PER_PROMPT", DEFAULT_SAMPLES_PER_PROMPT)
+    neighbors_per_eval = _env_int("CASD_NEIGHBORS_PER_EVAL", DEFAULT_NEIGHBORS_PER_EVAL)
+    score_microbatch_size = _env_int(
+        "CASD_SCORE_MICROBATCH_SIZE", DEFAULT_SCORE_MICROBATCH_SIZE
+    )
+    neighbor_lookup_path = os.environ.get(
+        "CASD_NEIGHBOR_LOOKUP_PATH", DEFAULT_NEIGHBOR_LOOKUP_PATH
+    )
 
     load_state(
         mock=mock,
@@ -820,7 +1072,10 @@ def main() -> None:
         tensor_parallel_size=tensor_parallel_size,
         gpu_memory_utilization=gpu_memory_utilization,
         trust_remote_code=trust_remote_code,
-        eval_n_samples=eval_n_samples,
+        samples_per_prompt=samples_per_prompt,
+        score_microbatch_size=score_microbatch_size,
+        neighbors_per_eval=neighbors_per_eval,
+        neighbor_lookup_path=neighbor_lookup_path,
     )
 
     import uvicorn
