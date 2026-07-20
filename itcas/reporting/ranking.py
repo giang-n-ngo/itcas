@@ -6,11 +6,13 @@ Several reports in this package (``batch_vs_sequential``, ``ndig_comparison``,
 slice of runs that belong to that row (mixed methods, single problem +
 difficulty slice), and a metric-curve cache restricted to those runs'
 ``run_name``\\ s. What a "row" actually *means* varies by report -- one
-difficulty level of one problem (the spacecraft layout used by
-``batch_vs_sequential``/``ndig_comparison``), one problem at a fixed
+difficulty level of one real-world problem (the layout used by
+``batch_vs_sequential``/``ndig_comparison`` for each problem in
+``batch_vs_sequential._REAL_WORLD_PROBLEMS``), one problem at a fixed
 difficulty (the "standard" layout used by those same modules), or -- as used
-by :mod:`itcas.reporting.ff_comparison` -- one of the ten FF-specific
-difficulty levels of the single ``spacecraft_formation_flying_a1`` problem.
+by :mod:`itcas.reporting.ff_comparison` / :mod:`itcas.reporting.casd_comparison`
+-- one of that single real-world problem's own difficulty levels (ten for
+``spacecraft_formation_flying_a1``, four for ``casd_llm``).
 
 This module deliberately does not know or care which of those a row
 represents. It only consumes the row triple's shape, so any current or

@@ -49,10 +49,11 @@ Coverage: every difficulty level present on disk is plotted (unlike
 ``school_comparison``, which restricts to one "default" difficulty), using
 the same rows-by-problem / rows-by-difficulty layout split as
 ``itcas.reporting.batch_vs_sequential`` -- one PDF per shared difficulty
-level with rows = problems, plus one PDF with rows = difficulty level for
-``spacecraft_formation_flying_a1`` (the only problem using its own
-``p1_00``..``p10_00`` difficulty scale instead of the shared
-``p0_01``/``p0_05``/``p0_10``/``p0_20`` scale).
+level with rows = problems, plus one PDF per **real-world** problem (see
+``batch_vs_sequential._REAL_WORLD_PROBLEMS``: ``spacecraft_formation_flying_a1``
+and ``casd_llm``, each using its own per-problem difficulty scale instead of
+the shared ``p0_01``/``p0_05``/``p0_10``/``p0_20`` scale) with rows = that
+problem's own difficulty levels.
 
 Each panel's columns are metric curves (see ``itcas.reporting.metrics``) plus
 a raw point-wise product column and a product-rank column, exactly mirroring
@@ -80,7 +81,7 @@ from pathlib import Path
 from typing import Optional
 
 from .batch_vs_sequential import (
-    _SPACECRAFT_PROBLEM,
+    _REAL_WORLD_PROBLEMS,
     _Row,
     _collect_family_runs,
     _difficulties_present,
@@ -400,9 +401,9 @@ def summarize_lse_ratio_comparison(
 ) -> list[str]:
     """Produce every (setting, difficulty) ratio-comparison grid PDF.
 
-    One PDF per shared difficulty level (rows = problems) plus one PDF for
-    ``spacecraft_formation_flying_a1`` (rows = its own difficulty levels),
-    per setting -- see module docstring.
+    One PDF per shared difficulty level (rows = problems) plus one PDF per
+    real-world problem (rows = its own difficulty levels), per setting --
+    see module docstring.
     """
     input_path = Path(input_dir)
     cfg = load_config(config_path)
@@ -420,7 +421,7 @@ def summarize_lse_ratio_comparison(
         }
 
         # Standard layout: rows = problems, one PDF per shared difficulty level.
-        standard_problems = [p for p in problems if p != _SPACECRAFT_PROBLEM]
+        standard_problems = [p for p in problems if p not in _REAL_WORLD_PROBLEMS]
         standard_runs = {p: runs_by_problem.get(p, []) for p in standard_problems}
         for diff in _difficulties_present(standard_runs):
             rows = _rows_by_problem(standard_problems, standard_runs, caches_by_problem, diff)
@@ -431,13 +432,16 @@ def summarize_lse_ratio_comparison(
             if ok is not None:
                 paths.append(str(ok))
 
-        # Spacecraft layout: rows = difficulty levels of this one problem.
-        if _SPACECRAFT_PROBLEM in problems:
-            sc_runs = runs_by_problem.get(_SPACECRAFT_PROBLEM, [])
-            sc_cache = caches_by_problem.get(_SPACECRAFT_PROBLEM, {})
-            rows = _rows_by_difficulty(sc_runs, sc_cache)
+        # Real-world layout: one PDF per real-world problem, rows = its own
+        # difficulty levels (see batch_vs_sequential._REAL_WORLD_PROBLEMS).
+        for rw_problem in _REAL_WORLD_PROBLEMS:
+            if rw_problem not in problems:
+                continue
+            rw_runs = runs_by_problem.get(rw_problem, [])
+            rw_cache = caches_by_problem.get(rw_problem, {})
+            rows = _rows_by_difficulty(rw_runs, rw_cache)
             if rows:
-                out_path = out_dir / f"ratio_comparison_{setting}_{_SPACECRAFT_PROBLEM}_vs_{suffix}.pdf"
+                out_path = out_dir / f"ratio_comparison_{setting}_{rw_problem}_vs_{suffix}.pdf"
                 ok = plot_ratio_grid(methods, styles, rows, axis, out_path)
                 if ok is not None:
                     paths.append(str(ok))

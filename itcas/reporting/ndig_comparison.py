@@ -33,7 +33,9 @@ one PDF per row rather than one combined grid, plus two standalone
 cross-row summary figures:
 
 * One single-row PDF per problem (for the "standard" difficulties) or per
-  difficulty level (for ``spacecraft_formation_flying_a1``): metric curves +
+  difficulty level (for each real-world problem, e.g.
+  ``spacecraft_formation_flying_a1``, ``casd_llm`` -- see
+  ``batch_vs_sequential._REAL_WORLD_PROBLEMS``): metric curves +
   raw product, no product-rank column (``include_product_rank_column=
   False`` -- that per-iteration "who's ahead right now" column only made
   sense across a shared grid; split one-row-per-PDF it adds nothing beyond
@@ -75,7 +77,7 @@ from typing import Optional
 from . import ranking
 from .batch_vs_sequential import (
     _AXIS,
-    _SPACECRAFT_PROBLEM,
+    _REAL_WORLD_PROBLEMS,
     _collect_family_runs,
     _collect_product_auc_for_stats,
     _difficulties_present,
@@ -136,31 +138,27 @@ def _emit_row_pdfs(
 
 def _emit_rank_summary_pdfs(
     rows: list,
-    row_kind: str,
     out_dir: Path,
     file_prefix: str,
-    title_prefix: str,
 ) -> list[str]:
     """The standalone average-rank + relative-AUC ("relative ranking") PDFs across ``rows``."""
     paths: list[str] = []
     metrics_present = _metrics_present_in_rows(rows)
 
     avg_rank_row = ranking.average_ranks_over_rows(rows, list(METHODS), _AXIS)
-    avg_rank_title = f"{title_prefix} -- average rank across {len(rows)} {row_kind}"
     avg_rank_path = out_dir / f"{file_prefix}_avg_rank_vs_evaluations.pdf"
     ok = _plot_avg_rank_figure(
         avg_rank_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
-        avg_rank_title, avg_rank_path,
+        avg_rank_path,
     )
     if ok is not None:
         paths.append(str(ok))
 
     relative_auc_row = ranking.relative_auc_ratios_over_rows(rows, list(METHODS), _AXIS)
-    relative_auc_title = f"{title_prefix} -- relative AUC across {len(rows)} {row_kind}"
     relative_auc_path = out_dir / f"{file_prefix}_relative_auc_vs_evaluations.pdf"
     ok = _plot_relative_auc_figure(
         relative_auc_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
-        relative_auc_title, relative_auc_path,
+        relative_auc_path,
     )
     if ok is not None:
         paths.append(str(ok))
@@ -187,7 +185,7 @@ def summarize_plots(
     paths: list[str] = []
     title_prefix = "itcas_ndig vs itcas_seq_ndig vs cr_ndig"
 
-    standard_problems = [p for p in problems if p != _SPACECRAFT_PROBLEM]
+    standard_problems = [p for p in problems if p not in _REAL_WORLD_PROBLEMS]
     standard_runs = {p: runs_by_problem.get(p, []) for p in standard_problems}
     for diff in _difficulties_present(standard_runs):
         rows = _rows_by_problem(standard_problems, standard_runs, caches_by_problem, diff)
@@ -197,25 +195,22 @@ def summarize_plots(
             _emit_row_pdfs(rows, diff, out_dir, f"ndig_comparison_{diff}", title_prefix)
         )
         paths.extend(
-            _emit_rank_summary_pdfs(
-                rows, f"problems ({diff})", out_dir, f"ndig_comparison_{diff}", title_prefix
-            )
+            _emit_rank_summary_pdfs(rows, out_dir, f"ndig_comparison_{diff}")
         )
 
-    if _SPACECRAFT_PROBLEM in problems:
-        sc_runs = runs_by_problem.get(_SPACECRAFT_PROBLEM, [])
-        sc_cache = caches_by_problem.get(_SPACECRAFT_PROBLEM, {})
-        rows = _rows_by_difficulty(sc_runs, sc_cache)
+    for rw_problem in _REAL_WORLD_PROBLEMS:
+        if rw_problem not in problems:
+            continue
+        rw_runs = runs_by_problem.get(rw_problem, [])
+        rw_cache = caches_by_problem.get(rw_problem, {})
+        rows = _rows_by_difficulty(rw_runs, rw_cache)
         if rows:
-            file_prefix = f"ndig_comparison_{_SPACECRAFT_PROBLEM}"
+            file_prefix = f"ndig_comparison_{rw_problem}"
             paths.extend(
-                _emit_row_pdfs(rows, _SPACECRAFT_PROBLEM, out_dir, file_prefix, title_prefix)
+                _emit_row_pdfs(rows, rw_problem, out_dir, file_prefix, title_prefix)
             )
             paths.extend(
-                _emit_rank_summary_pdfs(
-                    rows, f"difficulty levels ({_SPACECRAFT_PROBLEM})", out_dir,
-                    file_prefix, title_prefix,
-                )
+                _emit_rank_summary_pdfs(rows, out_dir, file_prefix)
             )
 
     return paths, runs_by_problem, caches_by_problem

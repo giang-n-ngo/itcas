@@ -947,8 +947,11 @@ def _collect_hv_for_stats(
 # variant here.
 #
 # "Synthetic" means every problem in ``configs/final_problems.json`` except
-# ``spacecraft_formation_flying_a1`` (the one problem backed by a real
-# Basilisk simulation rather than a closed-form objective). Every difficulty
+# the real-world problems (``spacecraft_formation_flying_a1``, backed by a
+# real Basilisk simulation; ``casd_llm``, backed by a live LLM + judge-model
+# server -- see ``_REAL_WORLD_PROBLEMS`` below and each's dedicated report,
+# ``ff_comparison.py`` / ``casd_comparison.py``) rather than a closed-form
+# objective. Every difficulty
 # level present on disk gets its own output subfolder (rows = problems,
 # columns = metric curves + raw product + product-rank, plus a bottom
 # average-rank row and a Friedman/Wilcoxon stats report) so a reader can open
@@ -964,7 +967,10 @@ def _collect_hv_for_stats(
 # module involved has already finished loading.
 # ---------------------------------------------------------------------------
 _DEFAULT_PROBLEMS_CONFIG = "configs/final_problems.json"
-_SPACECRAFT_PROBLEM = "spacecraft_formation_flying_a1"  # excluded: not synthetic
+# Real-world problems, excluded from "synthetic" -- keep in sync with
+# batch_vs_sequential._REAL_WORLD_PROBLEMS (not imported directly here to
+# avoid a circular import; see the module-level section docstring above).
+_REAL_WORLD_PROBLEMS: tuple[str, ...] = ("spacecraft_formation_flying_a1", "casd_llm")
 _SYNTHETIC_AXIS = "evals"  # evaluations only -- see section docstring above
 _SYNTHETIC_OUTPUT_DIR = "results/synthetic_comparison"
 
@@ -993,10 +999,10 @@ _SYNTHETIC_METHOD_STYLES: dict[str, dict] = {
 
 
 def _synthetic_problems(problems_config: str | Path = _DEFAULT_PROBLEMS_CONFIG) -> list[str]:
-    """Every problem in ``problems_config`` except the spacecraft simulation."""
+    """Every problem in ``problems_config`` except the real-world problems."""
     with Path(problems_config).open() as f:
         problems = json.load(f)["problems"]
-    return [p for p in problems if p != _SPACECRAFT_PROBLEM]
+    return [p for p in problems if p not in _REAL_WORLD_PROBLEMS]
 
 
 def _synthetic_report_to_markdown(report: StatsReport, difficulty: str) -> str:
@@ -1263,6 +1269,143 @@ def _plot_relative_auc_figure(
     return out_path
 
 
+def _draw_metric_line_panel(
+    ax,
+    relative_auc_by_level: list[tuple[str, dict[str, dict[str, float]]]],
+    column_key: str,
+    methods: list[str],
+    method_styles: dict[str, dict],
+    method_labels: Optional[dict[str, str]],
+    *,
+    higher_is_better: bool,
+) -> None:
+    """One panel of :func:`_plot_relative_auc_by_difficulty_figure`: one line per method.
+
+    ``relative_auc_by_level`` is ``[(level_label, relative_auc_row), ...]``
+    already in x-axis order (see that function's docstring). Plots evenly
+    spaced categorical x positions (``range(n)``, never the real difficulty
+    value) against each method's relative-AUC ratio for ``column_key`` at
+    that level, using ``float("nan")`` for a (method, level) combination with
+    no data so the line breaks there instead of raising or silently skipping
+    the method. Draws a dashed ``y=1.0`` reference line (mirrors
+    ``_draw_metric_bar_panel``'s ``reference_line=1.0``); ``higher_is_better``
+    is accepted for signature symmetry with the bar-panel helper but doesn't
+    otherwise affect this panel's rendering (a line plot has no "sort
+    direction" the way a bar chart does).
+    """
+    ax.tick_params(axis="both", labelsize=7)
+    n = len(relative_auc_by_level)
+    x = list(range(n))
+    any_data = False
+    for method in methods:
+        ys = []
+        for _level_label, row in relative_auc_by_level:
+            val = (row.get(column_key) or {}).get(method)
+            ys.append(float(val) if val is not None else float("nan"))
+        if all(v != v for v in ys):  # all NaN -- no data anywhere for this method
+            continue
+        any_data = True
+        style = method_styles.get(method, {})
+        label = method_labels.get(method, method) if method_labels else method
+        ax.plot(
+            x, ys,
+            color=style.get("color"), linestyle=style.get("linestyle", "-"),
+            marker="o", markersize=3, linewidth=1.2, label=label,
+        )
+    if not any_data:
+        ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
+                transform=ax.transAxes, fontsize=8, color="grey")
+        return
+    ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.set_xticks(x)
+    ax.set_xticklabels([lvl for lvl, _ in relative_auc_by_level], fontsize=7)
+
+
+def _plot_relative_auc_by_difficulty_figure(
+    relative_auc_by_level: list[tuple[str, dict[str, dict[str, float]]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+) -> Optional[Path]:
+    """Standalone line-plot figure: relative-AUC ratio per metric (+ product), across difficulty.
+
+    A sibling of :func:`_plot_relative_auc_figure` that shows the same
+    per-(row, method, column) relative-AUC ratios (see
+    :func:`itcas.reporting.ranking.relative_auc_ratios_over_rows`) *without*
+    averaging away the per-difficulty breakdown: :func:`_plot_relative_auc_figure`
+    collapses every row (difficulty level) into one number per method per
+    column, whereas this figure draws one line per method per column, plotted
+    across difficulty levels on the x-axis, so a method's trend as the
+    problem gets harder/easier stays visible.
+
+    ``relative_auc_by_level`` is ``[(level_label, relative_auc_row), ...]``,
+    already in the desired x-axis order, where each ``relative_auc_row`` is
+    one call to ``ranking.relative_auc_ratios_over_rows`` restricted to just
+    that level's own row(s) (i.e. *not* averaged across levels -- callers are
+    responsible for computing each level's ratios independently; see
+    ``ff_comparison``/``casd_comparison``'s single-row calls, or the
+    synthetic pipeline's already-per-difficulty ``_combine_synthetic_summaries``
+    output). ``level_label`` is used verbatim as that level's x-tick label
+    and should already be short (unlike the verbose multi-line row labels
+    used elsewhere in this package).
+
+    Same panel layout as :func:`_plot_relative_auc_figure` (one column per
+    metric in ``metrics_present`` plus a trailing Product column, each titled
+    with a ``↑``/``↓`` direction arrow) and the same per-method
+    color/linestyle from ``method_styles``, but a single legend shared across
+    every panel (built from the first panel's line handles) instead of
+    per-panel y-tick method labels, since every panel here shares the same
+    x-axis and set of methods.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    if not metrics_present:
+        return None
+
+    n_cols = len(metrics_present) + 1  # + product
+    fig_w = max(3.0 * n_cols, 10.0)
+    fig_h = 3.5
+    fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    axes = axes[0]
+
+    for c_idx, spec in enumerate(metrics_present):
+        ax = axes[c_idx]
+        _draw_metric_line_panel(
+            ax, relative_auc_by_level, spec.key, methods, method_styles, method_labels,
+            higher_is_better=spec.higher_is_better,
+        )
+        arrow = "↑" if spec.higher_is_better else "↓"
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=8)
+        if c_idx == 0:
+            ax.set_ylabel("Relative AUC by difficulty\n(1.0 = best)", fontsize=8)
+
+    _draw_metric_line_panel(
+        axes[-1], relative_auc_by_level, "product", methods, method_styles, method_labels,
+        higher_is_better=True,
+    )
+    axes[-1].set_title("Product ↑\n(raw)", fontsize=8)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles, labels, loc="lower center", ncol=min(len(labels), 6),
+            fontsize=7, bbox_to_anchor=(0.5, -0.05),
+        )
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 # ---------------------------------------------------------------------------
 # Synthetic comparison: per-problem summary + cross-problem combination.
 #
@@ -1466,14 +1609,19 @@ def _render_synthetic_aggregate(
     output_dir: str | Path,
     alpha: float = 0.05,
 ) -> list[str]:
-    """Render the three cross-problem outputs from combined per-problem summaries.
+    """Render the cross-problem outputs from combined per-problem summaries.
 
     Shared by :func:`summarize_synthetic_comparison` (monolithic, in-memory)
     and :func:`summarize_synthetic_comparison_aggregate` (split, disk-backed)
     so both write byte-for-byte the same
     ``synthetic_comparison_avg_rank_vs_evaluations.pdf``,
     ``synthetic_comparison_relative_auc_vs_evaluations.pdf``, and
-    ``synthetic_comparison_stats_report.{json,md}`` per difficulty.
+    ``synthetic_comparison_stats_report.{json,md}`` per difficulty, plus one
+    top-level ``synthetic_comparison_relative_auc_by_difficulty.pdf`` (see
+    :func:`_plot_relative_auc_by_difficulty_figure`) spanning every
+    difficulty at once -- unlike the three per-difficulty outputs above, this
+    one is written directly under ``output_dir``, not a per-difficulty
+    subfolder.
     """
     from .method_labels import METHOD_ABBREVIATIONS
 
@@ -1517,6 +1665,24 @@ def _render_synthetic_aggregate(
         md_path.write_text(_synthetic_report_to_markdown(report, diff), encoding="utf-8")
         paths.extend([str(json_path), str(md_path)])
 
+    # One top-level (not per-difficulty) line-plot figure spanning every
+    # difficulty at once -- see _plot_relative_auc_by_difficulty_figure and
+    # this function's own docstring. `combined[diff]["relative_auc"]` is
+    # already exactly one difficulty's own {column_key: {method: ratio}}
+    # (averaged across problems present at that difficulty, never across
+    # difficulties), so no further per-level computation is needed here.
+    if combined:
+        relative_auc_by_level = [(diff, combined[diff]["relative_auc"]) for diff in sorted(combined)]
+        metric_keys_all = {s.key for e in combined.values() for s in e["metrics_present"]}
+        metrics_present_all = [s for s in _ordered_metrics() if s.key in metric_keys_all]
+        by_diff_path = out_dir / "synthetic_comparison_relative_auc_by_difficulty.pdf"
+        ok = _plot_relative_auc_by_difficulty_figure(
+            relative_auc_by_level, list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
+            metrics_present_all, by_diff_path, method_labels=METHOD_ABBREVIATIONS,
+        )
+        if ok is not None:
+            paths.append(str(ok))
+
     return paths
 
 
@@ -1554,8 +1720,19 @@ def summarize_synthetic_comparison(
       (``H1: itcas_ndig > baseline``) against each of the five baselines,
       one row per problem (see :func:`_synthetic_report_to_markdown`).
 
+    Additionally writes one figure directly under ``<output_dir>`` (not a
+    per-difficulty subfolder, since it spans every difficulty at once):
+
+    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` -- a line-plot
+      sibling of the per-difficulty relative-AUC bar chart above: instead of
+      averaging each method's relative-AUC ratio across difficulties into one
+      bar, one line per method is drawn across difficulty levels on the
+      x-axis, so a method's trend as the problem gets harder/easier stays
+      visible (see :func:`_plot_relative_auc_by_difficulty_figure`).
+
     See the module-level section docstring above for why this only ever uses
-    the evaluations axis and excludes ``spacecraft_formation_flying_a1``.
+    the evaluations axis and excludes the real-world problems
+    (``spacecraft_formation_flying_a1``, ``casd_llm``).
 
     This is the monolithic (single-process) form of the pipeline: it holds
     every synthetic problem's ``RunSeries``/``CurveCache`` in memory at once,
@@ -1610,7 +1787,7 @@ def summarize_synthetic_comparison_problem(
     problem's contribution without re-reading any run logs.
 
     ``problems_config`` is used only to validate ``problem`` is one of the
-    synthetic problems (i.e. not the excluded spacecraft simulation).
+    synthetic problems (i.e. not one of the excluded real-world problems).
     ``alpha`` is accepted for CLI/signature symmetry with the other
     synthetic-comparison entry points but is unused here: the Friedman/
     Wilcoxon stats report needs every problem's raw per-seed AUCs together
@@ -1627,7 +1804,7 @@ def summarize_synthetic_comparison_problem(
     if problem not in synthetic_problems:
         raise ValueError(
             f"'{problem}' is not one of the synthetic problems in {problems_config} "
-            "(or is the excluded spacecraft_formation_flying_a1 simulation)"
+            f"(or is one of the excluded real-world problems: {_REAL_WORLD_PROBLEMS})"
         )
 
     runs = _collect_family_runs(input_path, [problem], list(SYNTHETIC_METHODS)).get(problem, [])
@@ -1659,7 +1836,10 @@ def summarize_synthetic_comparison_aggregate(
     ``synthetic_comparison_avg_rank_vs_evaluations.pdf``,
     ``synthetic_comparison_relative_auc_vs_evaluations.pdf``, and
     ``synthetic_comparison_stats_report.{json,md}``, all under
-    ``<output_dir>/<difficulty>/``.
+    ``<output_dir>/<difficulty>/`` -- plus the same top-level
+    ``synthetic_comparison_relative_auc_by_difficulty.pdf`` line-plot figure
+    (see :func:`summarize_synthetic_comparison`'s docstring), written
+    directly under ``<output_dir>``.
     """
     metrics_path = Path(metrics_dir)
     out_dir = Path(output_dir) if output_dir is not None else metrics_path.parent

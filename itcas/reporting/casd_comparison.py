@@ -1,10 +1,18 @@
-"""Six-method comparison on the FF problem (``spacecraft_formation_flying_a1``).
+"""Six-method comparison on the CASD problem (``casd_llm``).
 
-"The FF problem" is the only problem in this codebase that uses its own
-10-level difficulty scale (``p1_00``..``p10_00``, see
-``itcas.pipeline.problems``), instead of the shared ``p0_01``/``p0_05``/
-``p0_10``/``p0_20`` scale every other problem uses. This report compares six
-distinct algorithms on it, all at every difficulty level:
+"The CASD problem" is a **real-world** problem (backed by a live LLM +
+judge-model server, see ``contexts/llm_application.md`` and
+``itcas.pipeline.problems.ContextAwareSafeDecoding``) that -- like ``the FF
+problem`` (``spacecraft_formation_flying_a1``, see
+:mod:`itcas.reporting.ff_comparison`, whose structure this module mirrors) --
+uses its own per-problem difficulty scale (``p1_00``..``p4_00``, four
+hand-picked ``(tau_safety, tau_utility)`` levels, see
+``configs/thresholds.json["casd_llm"]`` and
+``itcas.pipeline.problems.ContextAwareSafeDecoding``'s "Difficulty levels"
+section) instead of the shared ``p0_01``/``p0_05``/``p0_10``/``p0_20`` scale
+every "standard" (synthetic, closed-form) problem uses. This report compares
+six distinct algorithms on it, all at every one of its four difficulty
+levels.
 
 * ``itcas_ndig`` -- **the proposed method**. Full ITCAS (QD-DPP greedy batch
   selection, honors ``--batch_size``), quality=``ndig``. Parsed label for
@@ -25,7 +33,7 @@ distinct algorithms on it, all at every difficulty level:
 
 **Axis.** All five baselines are forced-sequential (one record per
 individual evaluation); only ``itcas_ndig`` is batch. Exactly as in
-:mod:`itcas.reporting.ndig_comparison` (whose rationale this mirrors), that
+:mod:`itcas.reporting.ff_comparison` (whose rationale this mirrors), that
 makes **total individual evaluations** (``RunSeries.x_evals``) the only fair
 shared x-axis between a batch method and five sequential ones -- ``x_steps``
 would silently rescale the sequential methods' x-axis by a factor the batch
@@ -33,26 +41,29 @@ method doesn't share. This report therefore only ever uses ``_AXIS =
 "evals"``; there is no steps variant.
 
 **Layout.** Unlike the "standard" problems (which get one PDF per shared
-difficulty level, rows = problems), the FF problem already has all ten of its
-own difficulty levels as natural rows -- exactly the
+difficulty level, rows = problems), the CASD problem already has all four of
+its own difficulty levels as natural rows -- exactly the
 ``spacecraft_formation_flying_a1`` layout
 :func:`itcas.reporting.batch_vs_sequential._rows_by_difficulty` already
 builds for other reports. Mirroring :mod:`itcas.reporting.ndig_comparison`'s
-layout (one PDF per row, not one combined grid), this module writes **one
-single-row PDF per selected difficulty level** (``ff_comparison_pN_00_vs_
-evaluations.pdf``) plus two standalone cross-row summary figures -- an
-average-rank figure and a relative-AUC ("relative ranking") figure, see
-below -- instead of a single combined grid with an appended bottom row.
+layout (one PDF per row, not one combined grid) and
+:mod:`itcas.reporting.ff_comparison` (whose structure this mirrors
+end-to-end), this module writes **one single-row PDF per difficulty level**
+(``casd_comparison_pN_00_vs_evaluations.pdf``) plus two standalone cross-row
+summary figures -- an average-rank figure and a relative-AUC ("relative
+ranking") figure, see below -- instead of a single combined grid with an
+appended bottom row.
 
-The plotted rows are a **curated subset and order**, not all ten: only
-``_SELECTED_LEVELS`` (currently levels 2, 9, 3, 5, 6, 4, in that exact order)
-get a PDF, in that order -- not the full ten, and not sorted by level number.
-Each row's PDF drops the trailing **product-rank column**
-(``include_product_rank_column=False``, exactly as before): just the metric
-columns plus the raw-product column. No figure in this module ever renders a
-``suptitle`` -- ``plot_group_grid`` never renders one regardless of what's
-passed, and the two standalone summary figures (:func:`itcas.reporting.summary._plot_avg_rank_figure`
-/ :func:`itcas.reporting.summary._plot_relative_auc_figure`) only ever draw
+Unlike ``ff_comparison``, there is no curated row subset here: CASD only has
+four difficulty levels to begin with (not ten), so all of ``_SELECTED_LEVELS
+= (1, 2, 3, 4)`` get a PDF, in that (hardest-to-easiest) order -- no
+selection or reordering needed. Each row's PDF still drops the trailing
+**product-rank column** (``include_product_rank_column=False``, same as
+``ff_comparison``): just the metric columns plus the raw-product column. No
+figure in this module ever renders a ``suptitle`` -- ``plot_group_grid``
+never renders one regardless of what's passed, and the two standalone
+summary figures (:func:`itcas.reporting.summary._plot_avg_rank_figure` /
+:func:`itcas.reporting.summary._plot_relative_auc_figure`) only ever draw
 per-column titles (the metric name, plus a ``↑``/``↓`` arrow where the
 column has a direction). Method names in the legend and in every summary
 figure are shown via their short display labels from
@@ -60,92 +71,92 @@ figure are shown via their short display labels from
 names.
 
 Each row's label is **not** the raw difficulty tag (``p2_00`` etc.) but the
-level's bare feasibility-threshold values, e.g. ``(100m, 100g, 5N)`` for
-``(rmse, fuel, peak_thrust)``, read from ``configs/thresholds.json``'s
-``spacecraft_formation_flying_a1`` entry for that level, plus
-``#initials=N`` -- the count of scanned initial points that jointly satisfy
-all three thresholds, looked up from the matching ``threshold_scan`` entry
-(matched by exact ``(rmse, fuel, peak_thrust)`` threshold triple, the JSON's
-own ``B_all_constraints`` field) in
-``results/ff_initial_data/ff_initial_data_scan.json`` -- see
-:func:`_level_row_label`. This is purely cosmetic (row *content* --
-which runs/seeds feed each row -- is unchanged, only the row label and which
-rows/columns are shown); the statistics below are unaffected and still cover
-all ten difficulty levels.
+level's bare ``(tau_safety, tau_utility)`` threshold pair plus the joint
+feasible fraction, e.g. ``(tau_safety>=0.999, tau_utility>=-2.00)\\n~6.2%
+feasible`` for level 2, read from ``configs/thresholds.json``'s ``casd_llm``
+entry for that level -- see :func:`_level_row_label`. Unlike
+``ff_comparison``'s ``#initials`` (a count of scanned initial points, read
+from a separate ``results/ff_initial_data/ff_initial_data_scan.json`` scan
+file that has no CASD equivalent -- CASD's context space is a fixed pool of
+750 real prompts, not something scanned for feasible initial conditions the
+way FF's Basilisk initial states are), the feasible fraction here is parsed
+straight out of that level's own ``description`` string in
+``configs/thresholds.json`` (the ``~X%`` figure already recorded there from
+the 1000-sample real calibration run -- see
+``itcas.pipeline.problems.ContextAwareSafeDecoding``'s docstring). This is
+purely cosmetic (row *content* -- which runs/seeds feed each row -- is
+unchanged, only the row label changes); the statistics below are unaffected
+and still cover all four difficulty levels.
 
-**Average-rank figure.** A standalone PDF (``ff_comparison_avg_rank_vs_
+**Average-rank figure.** A standalone PDF (``casd_comparison_avg_rank_vs_
 evaluations.pdf``) via :mod:`itcas.reporting.ranking`
 (:func:`~itcas.reporting.ranking.average_ranks_over_rows`) and
 :func:`itcas.reporting.summary._plot_avg_rank_figure`, which are both
 deliberately row-agnostic so they work unchanged whether a "row" is a
 difficulty level (as here) or, in some future report, a problem at a fixed
-difficulty. Per the user's framing: for each metric, on each of the *plotted*
-FF difficulty levels (the six selected above, not all ten -- the average
-should reflect what's actually shown), compute the area under that metric's
-curve for every run, average those areas within each method (across its
-seeds present at that difficulty), then rank the six methods against each
-other by that mean area (tie-aware, rank 1 = best; direction follows the
-metric's ``higher_is_better``, so a smaller mean area is rank 1 for FCFD).
-Averaging those per-difficulty ranks across the six plotted levels gives each
-method's final average rank per metric, drawn as a horizontal bar chart (one
-bar per method, shortest = best) under each metric column. The same pipeline
-runs once more for the raw point-wise **product** of the metrics (always
-higher-is-better by construction), drawn under the Product column the same
-way.
+difficulty. Per the user's framing (mirrored from ``ff_comparison``): for
+each metric, on each of the four CASD difficulty levels, compute the area
+under that metric's curve for every run, average those areas within each
+method (across its seeds present at that difficulty), then rank the six
+methods against each other by that mean area (tie-aware, rank 1 = best;
+direction follows the metric's ``higher_is_better``, so a smaller mean area
+is rank 1 for FCFD). Averaging those per-difficulty ranks across the four
+levels gives each method's final average rank per metric, drawn as a
+horizontal bar chart (one bar per method, shortest = best) under each metric
+column. The same pipeline runs once more for the raw point-wise **product**
+of the metrics (always higher-is-better by construction), drawn under the
+Product column the same way.
 
 **Relative-ranking (relative-AUC) figure.** A second standalone PDF
-(``ff_comparison_relative_auc_vs_evaluations.pdf``) via
+(``casd_comparison_relative_auc_vs_evaluations.pdf``) via
 :func:`itcas.reporting.ranking.relative_auc_ratios_over_rows` and
-:func:`itcas.reporting.summary._plot_relative_auc_figure`, over the same six
-plotted levels. Instead of a rank, each column reports every (method, seed)
-AUC divided by the best per-seed AUC seen anywhere in that difficulty level
-(any method, any seed), averaged over seeds then over the six levels -- a
-ratio of 1.0 (dashed guide line) means "matched the best seed-level AUC seen
-anywhere at that difficulty"; away from 1.0 moves in that column's *worse*
-direction (below 1 for a higher-is-better column, above 1 for FCFD, the one
-lower-is-better metric).
+:func:`itcas.reporting.summary._plot_relative_auc_figure`, over the same four
+difficulty levels. Instead of a rank, each column reports every (method,
+seed) AUC divided by the best per-seed AUC seen anywhere in that difficulty
+level (any method, any seed), averaged over seeds then over the four levels
+-- a ratio of 1.0 (dashed guide line) means "matched the best seed-level AUC
+seen anywhere at that difficulty"; away from 1.0 moves in that column's
+*worse* direction (below 1 for a higher-is-better column, above 1 for FCFD,
+the one lower-is-better metric).
 
 **Relative-ranking-by-difficulty figure.** A third standalone PDF
-(``ff_comparison_relative_auc_by_difficulty.pdf``) via the same
+(``casd_comparison_relative_auc_by_difficulty.pdf``) via the same
 :func:`itcas.reporting.ranking.relative_auc_ratios_over_rows` and a new
 sibling of the figure above,
-:func:`itcas.reporting.summary._plot_relative_auc_by_difficulty_figure`. The
-bar chart above collapses the six *plotted* difficulty levels into one
-averaged ratio per method per column; this figure instead draws one line per
-method per column, plotted across difficulty level on the x-axis, so a
-method's trend as the problem gets harder/easier stays visible -- and, since
-there is no averaging to restrict to a curated subset for, this one plots
-**all ten** FF difficulty levels (sorted ascending by level number, i.e.
-hardest to easiest), not just the six plotted elsewhere in this module. Each
-level's ratio comes from its own single-level call to
-``relative_auc_ratios_over_rows`` (no cross-level averaging); x-tick labels
-are the bare level number (``"2"``, ``"9"``, ...), not the verbose
-``#initials``/threshold row labels used by the grid PDFs. All six methods'
-lines share one legend for the whole figure rather than per-panel labels.
+:func:`itcas.reporting.summary._plot_relative_auc_by_difficulty_figure`
+(mirrors ``ff_comparison``'s figure of the same name). The bar chart above
+collapses the four difficulty levels into one averaged ratio per method per
+column; this figure instead draws one line per method per column, plotted
+across difficulty level on the x-axis, so a method's trend as the problem
+gets harder/easier stays visible. Each level's ratio comes from its own
+single-level call to ``relative_auc_ratios_over_rows`` (no cross-level
+averaging); x-tick labels are the bare level number (``"1"``..``"4"``), not
+the verbose threshold/feasible-fraction row labels used by the grid PDFs.
+All six methods' lines share one legend for the whole figure rather than
+per-panel labels.
 
-**Statistics ("dominance of NDIG").** Per FF difficulty level -- all ten,
-independent of the plot's six-level subset above: a
-Friedman omnibus test over all six methods gates a Holm-Bonferroni corrected
-one-sided paired Wilcoxon signed-rank test (``H1: itcas_ndig > baseline``)
-against each of the five baselines individually. The per-seed scalar under
-test is the **area under the point-wise product curve**
+**Statistics ("dominance of NDIG").** Per CASD difficulty level -- all four:
+a Friedman omnibus test over all six methods gates a Holm-Bonferroni
+corrected one-sided paired Wilcoxon signed-rank test (``H1: itcas_ndig >
+baseline``) against each of the five baselines individually. The per-seed
+scalar under test is the **area under the point-wise product curve**
 (:func:`itcas.reporting.summary._compute_seed_product_curve` integrated via
 :func:`itcas.reporting.summary._curve_area`), exactly the convention
-:mod:`itcas.reporting.ndig_comparison` and
+``ff_comparison``/:mod:`itcas.reporting.ndig_comparison`/
 :mod:`itcas.reporting.batch_vs_sequential` use for the same
 batch-vs-sequential axis mismatch -- higher is better throughout (FCFD
 contributes as a reciprocal). This module writes its own Markdown renderer
-(generalizing :mod:`itcas.reporting.ndig_comparison`'s two-baseline table to
-five baseline columns) rather than ``stats.report_to_markdown``, whose prose
-assumes the opposite ("lower is better") direction; the underlying Wilcoxon
-computation itself (``H1: proposed > baseline``) is direction-agnostic and
-reused as-is via :func:`itcas.reporting.stats.run_stats`.
+(mirroring ``ff_comparison``'s five-baseline-column table) rather than
+``stats.report_to_markdown``, whose prose assumes the opposite ("lower is
+better") direction; the underlying Wilcoxon computation itself (``H1:
+proposed > baseline``) is direction-agnostic and reused as-is via
+:func:`itcas.reporting.stats.run_stats`.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -168,21 +179,23 @@ from .summary import (
     _precompute,
 )
 
-_PROBLEM = "spacecraft_formation_flying_a1"
+_PROBLEM = "casd_llm"
 _AXIS = "evals"  # the only axis this report ever plots/tests on -- see module docstring.
-_DEFAULT_OUTPUT_DIR = "results/ff_comparison"
+_DEFAULT_OUTPUT_DIR = "results/casd_comparison"
 
-# Which FF difficulty levels the plot shows, and in this exact order (not
-# sorted by level number, not the full ten) -- see module docstring's
-# "Layout" section.
-_SELECTED_LEVELS: tuple[int, ...] = (2, 9, 3, 5, 6, 4)
+# All four of CASD's own difficulty levels, hardest-to-easiest -- unlike
+# ff_comparison's curated 6-of-10 subset, there is no selection/reordering
+# here (see module docstring's "Layout" section).
+_SELECTED_LEVELS: tuple[int, ...] = (1, 2, 3, 4)
 
-# Repo-root-relative config paths, same construction as
+# Repo-root-relative config path, same construction as
 # itcas.reporting.metrics._EXPERIMENTS_PATH.
 _THRESHOLDS_CONFIG = Path(__file__).parent.parent.parent / "configs" / "thresholds.json"
-_INITIAL_DATA_SCAN = (
-    Path(__file__).parent.parent.parent / "results" / "ff_initial_data" / "ff_initial_data_scan.json"
-)
+
+# Matches the "~X%" (or "~X.Y%") joint-feasible-fraction figure embedded in
+# each level's `description` string in configs/thresholds.json["casd_llm"],
+# e.g. "...(~6.2% jointly feasible)" -> "6.2". See _level_row_label.
+_FEASIBLE_PCT_RE = re.compile(r"~([\d.]+)%")
 
 PROPOSED_METHOD = "itcas_ndig"
 BASELINE_METHODS: tuple[str, ...] = (
@@ -194,12 +207,9 @@ BASELINE_METHODS: tuple[str, ...] = (
 )
 METHODS: tuple[str, ...] = (PROPOSED_METHOD,) + BASELINE_METHODS
 
-# Stable hue per method (tab10), all solid -- these are six distinct
-# algorithms (no sequential/batch pair sharing one family here, unlike
-# batch_vs_sequential's paired scheme), so there's no "same color different
-# linestyle" pairing to preserve. itcas_ndig (proposed) gets blue, matching
-# the "proposed = blue" convention already used in ndig_comparison.py; random
-# (the trivial baseline) gets grey, the conventional trivial-baseline color.
+# Stable hue per method (tab10), all solid -- identical roster/coloring to
+# ff_comparison.py: six distinct algorithms, itcas_ndig (proposed) gets blue,
+# random (the trivial baseline) gets grey.
 _METHOD_STYLES: dict[str, dict] = {
     PROPOSED_METHOD: {"color": "#1f77b4", "linestyle": "-"},
     "bes_then_sample_lse10": {"color": "#ff7f0e", "linestyle": "-"},
@@ -211,64 +221,46 @@ _METHOD_STYLES: dict[str, dict] = {
 
 
 # ---------------------------------------------------------------------------
-# Row labels: threshold values + #initials per FF difficulty level
+# Row labels: threshold values + feasible fraction per CASD difficulty level
 # ---------------------------------------------------------------------------
-def _load_ff_thresholds(config_path: str | Path = _THRESHOLDS_CONFIG) -> dict[str, list[float]]:
-    """Return ``{level_str: [rmse_m, fuel_g, thrust_n]}`` for ``_PROBLEM``.
+def _load_casd_thresholds(config_path: str | Path = _THRESHOLDS_CONFIG) -> dict[str, dict]:
+    """Return ``{level_str: cfg}`` for ``_PROBLEM``, ``cfg`` being the raw
+    ``configs/thresholds.json["casd_llm"][level_str]`` entry (``tau_safety``,
+    ``tau_utility``, ``thresholds``, ``description``).
 
     ``level_str`` matches the string keys of ``configs/thresholds.json``'s
-    ``spacecraft_formation_flying_a1`` entry (``"1"``..``"10"``).
+    ``casd_llm`` entry (``"1"``..``"4"``).
     """
     with Path(config_path).open() as f:
         data = json.load(f)
-    problem_cfg = data[_PROBLEM]
-    return {level: cfg["thresholds"] for level, cfg in problem_cfg.items()}
+    return data[_PROBLEM]
 
 
-def _load_threshold_scan(scan_path: str | Path = _INITIAL_DATA_SCAN) -> list[dict]:
-    """Return the ``threshold_scan`` list from ``results/ff_initial_data/ff_initial_data_scan.json``."""
-    with Path(scan_path).open() as f:
-        data = json.load(f)
-    return data["threshold_scan"]
-
-
-def _lookup_b_all_constraints(
-    scan: list[dict], rmse: float, fuel: float, thrust: float
-) -> Optional[int]:
-    """Return ``B_all_constraints`` for the scan entry matching this exact threshold triple.
-
-    Matches by float equality (``math.isclose``) on ``rmse_threshold_m``/
-    ``fuel_threshold_g``/``peak_thrust_threshold_n``. Returns ``None`` if no
-    entry matches (rather than raising), so a row label can still be rendered
-    -- with a "?" placeholder -- even if the scan file's threshold grid ever
-    stops covering one of ``_SELECTED_LEVELS``' exact triples.
+def _feasible_pct(description: str) -> Optional[float]:
+    """Parse the ``~X%`` joint-feasible-fraction figure out of a level's
+    ``description`` string. Returns ``None`` (rather than raising) if the
+    string doesn't match, so a row label can still be rendered -- with a "?"
+    placeholder -- even if a future description stops following this format.
     """
-    for entry in scan:
-        if (
-            math.isclose(entry["rmse_threshold_m"], rmse)
-            and math.isclose(entry["fuel_threshold_g"], fuel)
-            and math.isclose(entry["peak_thrust_threshold_n"], thrust)
-        ):
-            return int(entry["B_all_constraints"])
-    return None
+    m = _FEASIBLE_PCT_RE.search(description)
+    return float(m.group(1)) if m else None
 
 
-def _level_row_label(
-    level: int,
-    thresholds_by_level: dict[str, list[float]],
-    scan: list[dict],
-) -> str:
-    """Return this level's row label: bare threshold values + scanned ``#initials`` count.
+def _level_row_label(level: int, thresholds_by_level: dict[str, dict]) -> str:
+    """Return this level's row label: bare ``(tau_safety, tau_utility)`` plus
+    the joint feasible fraction parsed from its ``description``.
 
-    Replaces the raw difficulty tag (``p2_00``) as the row label -- see module
-    docstring's "Layout" section. ``#initials`` is the scan's own
-    ``B_all_constraints`` field (count of scanned initial points jointly
-    satisfying all three thresholds), just displayed under a clearer name.
+    Replaces the raw difficulty tag (``p2_00``) as the row label -- see
+    module docstring's "Layout" section. Mirrors
+    ``ff_comparison._level_row_label``'s ``#initials`` line, but CASD has no
+    scanned-initial-points equivalent (see module docstring), so the second
+    line is the calibration run's own feasible-fraction figure instead.
     """
-    rmse, fuel, thrust = thresholds_by_level[str(level)]
-    b_all = _lookup_b_all_constraints(scan, rmse, fuel, thrust)
-    b_all_str = str(b_all) if b_all is not None else "?"
-    return f"({rmse:.0f}m, {fuel:.0f}g, {thrust:.0f}N)\n#initials={b_all_str}"
+    cfg = thresholds_by_level[str(level)]
+    tau_safety, tau_utility = cfg["thresholds"]
+    pct = _feasible_pct(cfg.get("description", ""))
+    pct_str = f"~{pct:g}% feasible" if pct is not None else "? feasible"
+    return f"(τ_safety≥{tau_safety:g}, τ_utility≥{tau_utility:g})\n{pct_str}"
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +270,8 @@ def summarize_plots(
     input_dir: str | Path,
     output_dir: str | Path,
 ) -> tuple[list[str], list[RunSeries], CurveCache]:
-    """Produce one single-row PDF per selected difficulty level plus the two
-    standalone summary figures (see module docstring). Returns ``(paths, runs, cache)``.
+    """Produce one single-row PDF per difficulty level plus the two standalone
+    summary figures (see module docstring). Returns ``(paths, runs, cache)``.
 
     The latter two are returned so the stats step below can reuse the same
     discovered runs / precomputed metric curves instead of re-reading logs.
@@ -296,24 +288,16 @@ def summarize_plots(
     if not all_rows:
         return paths, runs, cache
 
-    # Per-level (not the curated/reordered _SELECTED_LEVELS subset, and not
-    # averaged across levels) relative-AUC ratios feeding the by-difficulty
-    # line plot below -- see module docstring's "Relative-ranking-by-
-    # difficulty figure" section. Uses every difficulty level found in
-    # `runs` (all ten), unlike the six curated/reordered levels the grid PDFs
-    # and the other two standalone summary figures use. `all_rows` itself is
-    # only *string*-sorted by tag ("p10_00" sorts before "p1_00"
-    # lexicographically), so re-sort by the parsed integer level here to get
-    # true ascending-by-level ("hardest -> easiest" per this module's
-    # convention) order on the x-axis. Each level's ratios come from its own
-    # single-row `relative_auc_ratios_over_rows` call, so there is no
-    # cross-level averaging -- the whole point is to keep every level's own
-    # value visible.
-    all_rows_by_level = sorted(
-        all_rows, key=lambda row: int(row[0].removeprefix("p").split("_")[0])
-    )
+    # Per-level (not averaged across levels) relative-AUC ratios feeding the
+    # by-difficulty line plot below -- see module docstring's "Relative-
+    # ranking-by-difficulty figure" section. CASD's `_SELECTED_LEVELS`
+    # already covers all four levels (unlike ff_comparison's curated 6-of-10
+    # subset), so `all_rows` here already is the full sweep; still computed
+    # independently of the curated-subset rows below since each level's
+    # ratios must come from its own single-row `relative_auc_ratios_over_rows`
+    # call, with no cross-level averaging.
     relative_auc_by_level: list[tuple[str, dict[str, dict[str, float]]]] = []
-    for diff_label, row_runs, row_cache in all_rows_by_level:
+    for diff_label, row_runs, row_cache in all_rows:
         level_row = ranking.relative_auc_ratios_over_rows(
             [(diff_label, row_runs, row_cache)], list(METHODS), _AXIS
         )
@@ -321,15 +305,13 @@ def summarize_plots(
         relative_auc_by_level.append((tick_label, level_row))
     metrics_present_all = _metrics_present_in_rows(all_rows)
 
-    # Select + reorder + relabel to _SELECTED_LEVELS (see module docstring's
-    # "Layout" section) -- row content (runs/cache) is untouched, only which
-    # rows are kept, their order, and their label change. `diff_tags` keeps
-    # each row's raw difficulty tag (e.g. "p2_00") alongside it, purely for
-    # building clean filenames below -- the pretty multi-line row_label isn't
-    # filesystem-safe.
+    # Select + relabel to _SELECTED_LEVELS (see module docstring's "Layout"
+    # section) -- row content (runs/cache) is untouched, only the label
+    # changes. `diff_tags` keeps each row's raw difficulty tag (e.g.
+    # "p2_00") alongside it, purely for building clean filenames below -- the
+    # pretty multi-line row_label isn't filesystem-safe.
     rows_by_diff_label = {label: (runs_, cache_) for label, runs_, cache_ in all_rows}
-    thresholds_by_level = _load_ff_thresholds()
-    scan = _load_threshold_scan()
+    thresholds_by_level = _load_casd_thresholds()
     rows = []
     diff_tags = []
     for level in _SELECTED_LEVELS:
@@ -338,17 +320,17 @@ def summarize_plots(
         if entry is None:
             continue
         row_runs, row_cache = entry
-        row_label = _level_row_label(level, thresholds_by_level, scan)
+        row_label = _level_row_label(level, thresholds_by_level)
         rows.append((row_label, row_runs, row_cache))
         diff_tags.append(diff_label)
     if not rows:
         return paths, runs, cache
 
-    # One single-row PDF per selected difficulty level (see module docstring's
+    # One single-row PDF per difficulty level (see module docstring's
     # "Layout" section) -- mirrors itcas.reporting.ndig_comparison's
     # one-PDF-per-row split rather than one combined grid.
     for diff_tag, row in zip(diff_tags, rows):
-        out_path = out_dir / f"ff_comparison_{diff_tag}_vs_evaluations.pdf"
+        out_path = out_dir / f"casd_comparison_{diff_tag}_vs_evaluations.pdf"
         ok = plot_group_grid(
             list(METHODS), _METHOD_STYLES, [row], None, out_path,
             include_product_rank_column=False, method_labels=METHOD_ABBREVIATIONS,
@@ -357,11 +339,11 @@ def summarize_plots(
             paths.append(str(ok))
 
     # Standalone average-rank + relative-AUC ("relative ranking") figures
-    # across the plotted levels (see module docstring).
+    # across the four difficulty levels (see module docstring).
     metrics_present = _metrics_present_in_rows(rows)
 
     avg_rank_row = ranking.average_ranks_over_rows(rows, list(METHODS), _AXIS)
-    avg_rank_path = out_dir / "ff_comparison_avg_rank_vs_evaluations.pdf"
+    avg_rank_path = out_dir / "casd_comparison_avg_rank_vs_evaluations.pdf"
     ok = _plot_avg_rank_figure(
         avg_rank_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
         avg_rank_path, method_labels=METHOD_ABBREVIATIONS,
@@ -370,7 +352,7 @@ def summarize_plots(
         paths.append(str(ok))
 
     relative_auc_row = ranking.relative_auc_ratios_over_rows(rows, list(METHODS), _AXIS)
-    relative_auc_path = out_dir / "ff_comparison_relative_auc_vs_evaluations.pdf"
+    relative_auc_path = out_dir / "casd_comparison_relative_auc_vs_evaluations.pdf"
     ok = _plot_relative_auc_figure(
         relative_auc_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
         relative_auc_path, method_labels=METHOD_ABBREVIATIONS,
@@ -379,10 +361,8 @@ def summarize_plots(
         paths.append(str(ok))
 
     # Line-plot sibling of the relative-AUC bar chart above: one line per
-    # method across every one of the ten FF difficulty levels (not the six
-    # curated/reordered/averaged-away ones the bar chart uses) -- see module
-    # docstring.
-    by_difficulty_path = out_dir / "ff_comparison_relative_auc_by_difficulty.pdf"
+    # method across all four CASD difficulty levels -- see module docstring.
+    by_difficulty_path = out_dir / "casd_comparison_relative_auc_by_difficulty.pdf"
     ok = _plot_relative_auc_by_difficulty_figure(
         relative_auc_by_level, list(METHODS), _METHOD_STYLES, metrics_present_all,
         by_difficulty_path, method_labels=METHOD_ABBREVIATIONS,
@@ -421,12 +401,10 @@ def build_stats_report(
 def _report_to_markdown(report: StatsReport) -> str:
     """Custom renderer: higher product-curve AUC is better (see module docstring).
 
-    Generalizes ``ndig_comparison._report_to_markdown``'s hardcoded
-    two-baseline-column table to a dynamic ``len(BASELINE_METHODS)``-column
-    layout (five columns here).
+    Mirrors ``ff_comparison._report_to_markdown``'s five-baseline-column table.
     """
     lines: list[str] = []
-    lines.append(f"# FF comparison — {PROPOSED_METHOD} dominance vs 5 baselines ({_PROBLEM})")
+    lines.append(f"# CASD comparison — {PROPOSED_METHOD} dominance vs 5 baselines ({_PROBLEM})")
     lines.append("")
     lines.append(
         f"**Proposed:** `{report.proposed_method}` &nbsp;|&nbsp; "
@@ -435,7 +413,7 @@ def _report_to_markdown(report: StatsReport) -> str:
     )
     lines.append("")
     lines.append(
-        "Per FF difficulty level: a **Friedman omnibus test** over all six methods "
+        "Per CASD difficulty level: a **Friedman omnibus test** over all six methods "
         f"gates a **one-sided paired Wilcoxon signed-rank test** (`H1: {PROPOSED_METHOD} > "
         "baseline`) against each of the five baselines individually, Holm-Bonferroni "
         "corrected over those five baselines. The per-seed scalar is the **area under the "
@@ -498,7 +476,7 @@ def _report_to_markdown(report: StatsReport) -> str:
         f"`{b}` in **{_count_sig(b)} / {n_tested}**" for b in BASELINE_METHODS
     )
     lines.append(
-        f"**Summary:** {n_tested} / {n_total} FF difficulty levels had a significant Friedman "
+        f"**Summary:** {n_tested} / {n_total} CASD difficulty levels had a significant Friedman "
         f"omnibus test (α={report.alpha}). Among those, `{PROPOSED_METHOD}` significantly "
         f"outperforms {per_baseline_summary} groups."
     )
@@ -507,10 +485,10 @@ def _report_to_markdown(report: StatsReport) -> str:
 
 
 def write_stats_report(report: StatsReport, out_dir: Path) -> tuple[Path, Path]:
-    """Write ``ff_comparison_stats_report.{json,md}`` to ``out_dir``."""
+    """Write ``casd_comparison_stats_report.{json,md}`` to ``out_dir``."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = out_dir / "ff_comparison_stats_report.json"
-    md_path = out_dir / "ff_comparison_stats_report.md"
+    json_path = out_dir / "casd_comparison_stats_report.json"
+    md_path = out_dir / "casd_comparison_stats_report.md"
     json_path.write_text(report_to_json(report), encoding="utf-8")
     md_path.write_text(_report_to_markdown(report), encoding="utf-8")
     return json_path, md_path
@@ -519,7 +497,7 @@ def write_stats_report(report: StatsReport, out_dir: Path) -> tuple[Path, Path]:
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
-def summarize_ff_comparison(
+def summarize_casd_comparison(
     input_dir: str | Path,
     output_dir: str | Path | None = None,
     alpha: float = 0.05,
@@ -536,7 +514,7 @@ def summarize_ff_comparison(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser("itcas.ff_comparison")
+    parser = argparse.ArgumentParser("itcas.casd_comparison")
     parser.add_argument("--input-dir", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default=_DEFAULT_OUTPUT_DIR)
     parser.add_argument(
@@ -545,7 +523,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    paths = summarize_ff_comparison(
+    paths = summarize_casd_comparison(
         args.input_dir,
         output_dir=args.output_dir,
         alpha=args.alpha,

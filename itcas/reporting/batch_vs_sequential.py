@@ -35,10 +35,13 @@ area-under-the-product-curve collector only ever uses this axis.
 Output layout (per plot group ``{cas, straddle}``):
 
 * One PDF per "standard" difficulty (``p0_01``, ``p0_05``, ``p0_10``,
-  ``p0_20``) with rows = the 15 problems that share that difficulty scale.
-* One PDF for ``spacecraft_formation_flying_a1`` -- the only problem using a
-  distinct 10-level difficulty scale (``p1_00``..``p10_00``) -- with rows =
-  its own difficulty levels instead of rows = problems.
+  ``p0_20``) with rows = the problems that share that difficulty scale.
+* One PDF per **real-world** problem (``spacecraft_formation_flying_a1``,
+  ``casd_llm`` -- see ``_REAL_WORLD_PROBLEMS``), each using its own
+  per-problem difficulty scale (``p1_00``..``p10_00`` for the former,
+  ``p1_00``..``p4_00`` for the latter) instead of the shared
+  ``p0_01``/``p0_05``/``p0_10``/``p0_20`` scale -- with rows = that problem's
+  own difficulty levels instead of rows = problems.
 
 Statistical testing (reinstated; see ``contexts/metrics.md``) stays
 per-*family* (``eci``, ``moc_cas_hard``, ``straddle``) even though the plots
@@ -108,10 +111,18 @@ _DEFAULT_PLOT_GROUPS: dict[str, list[str]] = {
     "straddle": ["straddle"],
 }
 
-# The one problem that uses a distinct per-problem difficulty scale
-# (p1_00..p10_00, 10 levels) instead of the shared p0_01/p0_05/p0_10/p0_20
-# scale used by every other problem in configs/final_problems.json.
-_SPACECRAFT_PROBLEM = "spacecraft_formation_flying_a1"
+# Problems that use their own per-problem difficulty scale (p1_00..pN_00, via
+# --threshold_pct) instead of the shared p0_01/p0_05/p0_10/p0_20 scale used by
+# every other problem in configs/final_problems.json. Each is backed by a
+# real-world evaluator (Basilisk simulation for the former, a live LLM +
+# judge-model server for the latter) rather than a closed-form objective --
+# see ff_comparison.py / casd_comparison.py, the dedicated per-problem reports
+# for each. The level *count* differs per problem (10 for FF, 4 for CASD;
+# see configs/thresholds.json) but every helper below (_rows_by_difficulty,
+# _difficulties_present, ...) is already agnostic to how many levels a given
+# problem has, so adding a second entry here is the only change needed to
+# extend the "rows = difficulty level" layout to a new real-world problem.
+_REAL_WORLD_PROBLEMS: tuple[str, ...] = ("spacecraft_formation_flying_a1", "casd_llm")
 
 _AXIS = "evals"  # the only axis this report ever plots/tests on -- see module docstring.
 
@@ -603,7 +614,7 @@ def summarize_group(
     paths: list[str] = []
 
     # Standard layout: rows = problems, one PDF per shared difficulty level.
-    standard_problems = [p for p in problems if p != _SPACECRAFT_PROBLEM]
+    standard_problems = [p for p in problems if p not in _REAL_WORLD_PROBLEMS]
     standard_runs = {p: runs_by_problem.get(p, []) for p in standard_problems}
     for diff in _difficulties_present(standard_runs):
         rows = _rows_by_problem(standard_problems, standard_runs, caches_by_problem, diff)
@@ -615,17 +626,20 @@ def summarize_group(
         if ok is not None:
             paths.append(str(ok))
 
-    # Spacecraft layout: rows = difficulty levels of this one problem.
-    if _SPACECRAFT_PROBLEM in problems:
-        sc_runs = runs_by_problem.get(_SPACECRAFT_PROBLEM, [])
-        sc_cache = caches_by_problem.get(_SPACECRAFT_PROBLEM, {})
-        rows = _rows_by_difficulty(sc_runs, sc_cache)
+    # Real-world layout: one PDF per real-world problem, rows = its own
+    # difficulty levels (see _REAL_WORLD_PROBLEMS above).
+    for rw_problem in _REAL_WORLD_PROBLEMS:
+        if rw_problem not in problems:
+            continue
+        rw_runs = runs_by_problem.get(rw_problem, [])
+        rw_cache = caches_by_problem.get(rw_problem, {})
+        rows = _rows_by_difficulty(rw_runs, rw_cache)
         if rows:
             title = (
-                f"Batch vs sequential — {fam_desc} ({_SPACECRAFT_PROBLEM}, "
+                f"Batch vs sequential — {fam_desc} ({rw_problem}, "
                 "rows = difficulty level) vs total individual evaluations"
             )
-            out_path = out_dir / f"{group_name}_{_SPACECRAFT_PROBLEM}_vs_evaluations.pdf"
+            out_path = out_dir / f"{group_name}_{rw_problem}_vs_evaluations.pdf"
             ok = plot_group_grid(methods, method_styles, rows, title, out_path)
             if ok is not None:
                 paths.append(str(ok))
@@ -962,17 +976,24 @@ def write_overall_summary(
     lines.append("## Per-difficulty-level breakdown")
     lines.append("")
     lines.append(
-        "For each difficulty level, across every problem that has it, tallied separately per "
-        "family. Note `spacecraft_formation_flying_a1` uses its own difficulty scale "
-        "(`p1_00`..`p10_00`) shared with no other problem, so those rows necessarily reflect "
-        "that single problem only."
+        "For each *shared* difficulty level (`p0_01`/`p0_05`/`p0_10`/`p0_20`), across every "
+        "standard problem that has it, tallied separately per family. Excludes the real-world "
+        "problems (`spacecraft_formation_flying_a1`, `casd_llm`, see `_REAL_WORLD_PROBLEMS`): "
+        "each uses its own difficulty scale (`p1_00`..`p10_00` / `p1_00`..`p4_00` respectively) "
+        "that reuses the same `pN_00` tag strings across problems, so a combined tally keyed "
+        "only on that tag would silently merge two unrelated problems' difficulty levels; their "
+        "difficulty-level results are unambiguous already in the per-problem breakdown above."
     )
     lines.append("")
-    all_diffs = sorted({g.difficulty for f in families for g in family_reports[f].groups})
+    standard_groups_only = [
+        g
+        for f in families
+        for g in family_reports[f].groups
+        if g.problem not in _REAL_WORLD_PROBLEMS
+    ]
+    all_diffs = sorted({g.difficulty for g in standard_groups_only})
     for diff in all_diffs:
-        diff_groups_any = [
-            g for f in families for g in family_reports[f].groups if g.difficulty == diff
-        ]
+        diff_groups_any = [g for g in standard_groups_only if g.difficulty == diff]
         if not diff_groups_any:
             continue
         lines.append(f"### `{diff}`")
@@ -980,7 +1001,10 @@ def write_overall_summary(
         lines.append("| Family | Problems tested | Batch sig. better | No sig. diff. | Insufficient data |")
         lines.append("|:-------|-----------------:|-------------------:|---------------:|-------------------:|")
         for f in families:
-            groups = [g for g in family_reports[f].groups if g.difficulty == diff]
+            groups = [
+                g for g in family_reports[f].groups
+                if g.difficulty == diff and g.problem not in _REAL_WORLD_PROBLEMS
+            ]
             if groups:
                 lines.append(_tally_row(f, groups))
         lines.append("")

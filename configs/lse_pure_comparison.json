@@ -1,4 +1,7 @@
 {
+    "default_difficulty": 0.05,
+    "lse_proportions": [10, 25, 50],
+    "bases": ["straddle", "bes"],
     "problems": [
         "all_valley_8d",
         "alpine_12d",
@@ -7,7 +10,6 @@
         "dtlz3_8d",
         "ellipsoid_rastrigin_20d",
         "griewank_16d",
-        "spacecraft_formation_flying_a1",
         "heterogeneous_quadrants_6d",
         "levy_16d",
         "multimodal_trap_20d",
@@ -15,9 +17,6 @@
         "styblinski_tang_6d",
         "rastrigin_griewank_sphere_20d",
         "styblinski_tang_levy_10d",
-        "zdt3_6d",
-        "casd_llm"
-    ],
-    "temporary": [
+        "zdt3_6d"
     ]
 }
