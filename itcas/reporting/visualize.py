@@ -403,7 +403,7 @@ def _plot_metric(
     if not plotted:
         plt.close(fig)
         return None
-    ax.legend(loc="best", fontsize=8)
+    ax.legend(loc="best", fontsize=12)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight")

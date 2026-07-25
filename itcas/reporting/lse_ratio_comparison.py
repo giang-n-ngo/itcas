@@ -264,7 +264,7 @@ def plot_ratio_grid(
         for c_idx, spec in enumerate(metrics_present):
             ax = axes[r_idx][c_idx]
             ax.grid(True, alpha=0.25)
-            ax.tick_params(axis="both", labelsize=7)
+            ax.tick_params(axis="both", labelsize=10.5)
             plotted = False
             for method in methods:
                 seeded_runs = method_runs.get(method, [])
@@ -294,13 +294,13 @@ def plot_ratio_grid(
                 plotted = True
             if not plotted:
                 ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=8, color="grey")
+                        transform=ax.transAxes, fontsize=12, color="grey")
             if r_idx == 0:
-                ax.set_title(_SHORT_CURVE_LABELS.get(spec.key, spec.label), fontsize=8)
+                ax.set_title(_SHORT_CURVE_LABELS.get(spec.key, spec.label), fontsize=12)
             if r_idx == n_rows - 1:
-                ax.set_xlabel(axis_label, fontsize=8)
+                ax.set_xlabel(axis_label, fontsize=12)
             if c_idx == 0:
-                ax.set_ylabel(row_label, fontsize=8)
+                ax.set_ylabel(row_label, fontsize=12)
 
         method_x, method_med, method_lo, method_hi = _per_method_product_curves(
             method_runs, methods, axis, cache, metrics_present,
@@ -309,7 +309,7 @@ def plot_ratio_grid(
         # Raw product column
         ax = axes[r_idx][-2]
         ax.grid(True, alpha=0.25)
-        ax.tick_params(axis="both", labelsize=7)
+        ax.tick_params(axis="both", labelsize=10.5)
         plotted = False
         for method in methods:
             if method not in method_med:
@@ -326,16 +326,16 @@ def plot_ratio_grid(
             plotted = True
         if not plotted:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8, color="grey")
+                    transform=ax.transAxes, fontsize=12, color="grey")
         if r_idx == 0:
-            ax.set_title("Product\n(raw, higher is better)", fontsize=8)
+            ax.set_title("Product\n(raw, higher is better)", fontsize=12)
         if r_idx == n_rows - 1:
-            ax.set_xlabel(axis_label, fontsize=8)
+            ax.set_xlabel(axis_label, fontsize=12)
 
         # Rank column
         ax = axes[r_idx][-1]
         ax.grid(True, axis="y", alpha=0.25)
-        ax.tick_params(axis="both", labelsize=7)
+        ax.tick_params(axis="both", labelsize=10.5)
         plotted = False
         if method_med:
             grid, rank_curves = _rank_curves_on_union_grid(method_x, method_med)
@@ -351,11 +351,11 @@ def plot_ratio_grid(
             ax.set_yticks(list(range(1, n_ranked + 1)))
         if not plotted:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8, color="grey")
+                    transform=ax.transAxes, fontsize=12, color="grey")
         if r_idx == 0:
-            ax.set_title("Product rank\n(1 = best)", fontsize=8)
+            ax.set_title("Product rank\n(1 = best)", fontsize=12)
         if r_idx == n_rows - 1:
-            ax.set_xlabel(axis_label, fontsize=8)
+            ax.set_xlabel(axis_label, fontsize=12)
 
     # Shared legend
     handles_seen: dict[str, object] = {}
@@ -367,7 +367,7 @@ def plot_ratio_grid(
         fig.legend(
             list(handles_seen.values()), list(handles_seen.keys()),
             loc="lower center", ncol=min(len(methods), 6),
-            fontsize=8, bbox_to_anchor=(0.5, 0.0),
+            fontsize=12, bbox_to_anchor=(0.5, 0.0),
         )
         fig.tight_layout(rect=(0, 0.06, 1, 1))
     else:

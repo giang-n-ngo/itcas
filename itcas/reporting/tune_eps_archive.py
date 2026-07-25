@@ -9,28 +9,78 @@ and writes it into ``configs/experiments.json`` per ``(problem, difficulty)``
 (difficulty matters because the feasibility threshold ``tau`` — and hence the
 log-transform — differs per difficulty).
 
-Per the spec, for one ``(problem, difficulty)`` group:
+For one ``(problem, difficulty)`` group, ``eps`` is calibrated from a pooled
+population of **within-trial "nearest-already-discovered" gaps**:
 
-1. **Pool**: gather every strictly feasible objective vector ``Y`` discovered
-   by *any method, any seed* under ``results/sweep/<problem>/<difficulty>/``.
-2. **Log-transform** relative to the feasibility threshold ``tau``:
-   ``y'_i = log(1 + (y_i - tau_i))`` (defined since feasibility guarantees
-   ``y_i - tau_i >= 0``).
-3. Compute the pairwise Euclidean distance matrix over the pooled transformed
-   set (``scipy.spatial.distance.pdist``).
-4. Filter out zero distances (self/exact-duplicate pairs) — *before* taking
-   the percentile.
-5. ``eps = 5th percentile`` of the remaining strictly-positive distances.
+1. **Replay each trial on its own**: for every individual trial (one
+   ``(method, seed)`` run) under ``results/sweep/<problem>/<difficulty>/``,
+   walk that trial's own strictly-feasible objective vectors in chronological
+   discovery order, log-transform them (``y'_i = log(1 + (y_i - tau_i))``),
+   and record — for every feasible point after the first — its Euclidean
+   distance to the single nearest point *already discovered by that same
+   trial*. This literally replays the greedy insertion loop in
+   ``itcas.reporting.metrics.epsilon_archive_size_curve`` with the ``eps``
+   threshold removed (every point is unconditionally "discovered"), producing
+   a threshold-independent population of raw within-trial spacings
+   (:func:`_within_trial_gaps` / :func:`pooled_within_trial_gaps`).
+2. **Pool** those per-trial gap values across every trial (method x seed) in
+   the group into one flat population.
+3. **Filter** out exact-zero gaps (duplicate evaluations within a trial).
+4. Set ``eps`` to the ``Nth`` percentile (default 75th — see "Why 75th, not a
+   low percentile" below) of that pooled gap population
+   (:func:`eps_from_gaps`).
 
-Minimum sample size: ``pdist`` requires >= 2 pooled feasible points, but a
-5th-percentile estimate from a handful of points is unreliable (extrapolating
-from very few pairwise distances). We require at least ``MIN_POOLED_FEASIBLE``
-(default 10) pooled feasible points — giving >= 45 pairwise distances, enough
-that the 5th percentile reflects several near-duplicate pairs rather than a
-single one. Groups with fewer pooled feasible points are skipped (``eps =
-None``); the config writer then leaves that slot untouched so the existing
-resolution order (``problems[problem][difficulty] -> problems[problem].defaults
--> defaults``) falls back to the hand-set value already on disk.
+**Why not "distance between any two pooled objective vectors, regardless of
+trial"** (this module's original approach — :func:`pooled_transformed_feasible`
++ :func:`eps_from_pool`, both still present below as general-purpose point-cloud
+utilities but **no longer used by the calibration path**): the ε-archive is
+built *per trial* (`contexts/metrics.md` §4, "Archive Construction (Per
+Algorithm Trial)" — each new point is only ever compared against that same
+trial's own archive-so-far), but pooling every trial's points together and
+taking a low percentile of ``pdist`` over the combined cloud calibrates
+against a different, denser population: cross-trial pairs, where many
+independent methods/seeds converge on similar good regions of objective
+space (and, confirmed by a diagnostic against real
+``spacecraft_formation_flying_a1`` p2 data, a meaningful fraction of
+near-duplicate points from a shared/reused historical init pool — ~24-51% of
+pooled points there have a near-duplicate partner *somewhere in the pool*,
+though this turned out to barely move the pooled ``pdist`` percentile itself,
+since duplicate pairs are a vanishing fraction of the ``O(n^2)`` pair count at
+this pool size). A low percentile of that cross-trial population is
+systematically smaller than the spacing a *single* trial's own sequential
+discoveries actually exhibit. Empirically, real per-trial archive/positives
+ratios measured against actual FF p2 trial reconstructions at the old
+calibration (5th percentile of the cross-trial pool, eps=0.396) came out at
+1.0 for the median trial — literally every feasible point gets admitted,
+indistinguishable from the raw Number-of-Positives curve — and only
+marginally improved at 10th percentile (eps=0.534, median ratio 0.83).
+This matches a real user's report: the ε-Archive-Size curve for FF still
+looked like Number-of-Positives even after bumping the calibration percentile
+from 5th to 10th per the spec's original troubleshooting note.
+
+**Why 75th, not a low percentile, of the corrected (within-trial-gap)
+population**: low percentiles (5th/10th/25th) of the within-trial-gap
+population *also* reproduce the same degenerate ratio~1.0 behavior — most
+within-trial consecutive gaps are small (that is expected local BO
+exploration), so a low percentile of this population is dominated by small
+local steps rather than "typical trial-to-trial distinguishability".
+Empirically sweeping percentiles 5-90 of the within-trial-gap population
+against real FF p2 trial reconstructions found a sweet spot around the
+70th-75th percentile: high enough that the resulting ``eps`` meaningfully
+separates the archive-size curve from the raw positives curve (median
+archive_final/positives_final ratio ~0.56, mean ~0.62, at the 75th
+percentile — vs 1.0 at the old 5th-percentile cross-trial anchor), while
+keeping degenerate collapse (archive stuck at <=1 point despite >3 positives)
+rare (2/497 trials, 0.4%). 75th percentile of the within-trial-gap population
+is therefore the new default (``DEFAULT_PERCENTILE``).
+
+Minimum sample size: a percentile estimate from a handful of gap observations
+is unreliable. We require at least ``MIN_POOLED_FEASIBLE`` (default 10)
+pooled within-trial gap observations before trusting the percentile. Groups
+with fewer are skipped (``eps = None``); the config writer then leaves that
+slot untouched so the existing resolution order
+(``problems[problem][difficulty] -> problems[problem].defaults -> defaults``)
+falls back to the hand-set value already on disk.
 
 Scaling notes (this matters at full-sweep scale — ~40k runs / ~4.6 GB of
 JSONL under ``results/sweep``):
@@ -47,6 +97,15 @@ JSONL under ``results/sweep``):
   at a time: it loads that group's runs, computes its ``eps``, and discards
   the loaded runs before moving to the next group, rather than holding the
   entire sweep's parsed runs in memory simultaneously.
+* :func:`pooled_within_trial_gaps` costs ``O(sum_over_trials(n_trial^2))``,
+  not ``O(n_pool^2))`` over the whole group's pooled feasible-point count —
+  each trial's own feasible-point count ``n_trial`` is bounded by that
+  problem's evaluation budget (``<=250`` across the current sweep configs,
+  typically far less), so this is *much* cheaper than the single big
+  ``pdist`` the old cross-trial approach needed, and the
+  ``DEFAULT_MAX_POOL_SIZE`` subsampling safeguard (still applied, now to the
+  pooled gap population before taking the percentile) is a defensive cap
+  rather than a load-bearing necessity.
 
 Usage::
 
@@ -71,9 +130,10 @@ from scipy.spatial.distance import pdist
 from ..metrics import is_feasible
 from .visualize import _iter_jsonl
 
-DEFAULT_PERCENTILE = 5.0
-# Minimum pooled feasible points required before we trust a percentile
-# estimate (see module docstring for the rationale).
+DEFAULT_PERCENTILE = 75.0
+# Minimum pooled gap observations (within-trial nearest-already-discovered
+# distances, see pooled_within_trial_gaps) required before we trust a
+# percentile estimate (see module docstring for the rationale).
 MIN_POOLED_FEASIBLE = 10
 # scipy.spatial.distance.pdist is O(n^2) in both time and memory (a condensed
 # array of n*(n-1)/2 float64 entries, plus further same-sized working copies
@@ -82,11 +142,16 @@ MIN_POOLED_FEASIBLE = 10
 # across all methods/seeds (observed: ~30k for an easy `all_valley_8d`
 # difficulty), which would need multiple GB just for the pdist array and
 # ~15-20 GB peak RSS end-to-end once those working copies are accounted for
-# -- unsafe to run unattended even on a dedicated Slurm CPU node. Beyond
-# MAX_POOL_SIZE we take a fixed-seed uniform random subsample of the pooled
-# points before computing pairwise distances: a percentile of pairwise
-# distances among an i.i.d. subsample of the point cloud converges to the
-# same distribution as over the full set (the same logic behind the common
+# -- unsafe to run unattended even on a dedicated Slurm CPU node. This still
+# matters for eps_from_pool (the legacy cross-trial point-cloud utility,
+# kept below but no longer used by the calibration path) and is reused as a
+# defensive cap on the pooled *gap* population in eps_from_gaps (the
+# calibration path now in use), even though that population is normally
+# much smaller than a full cross-trial point pool (see module docstring
+# "Scaling notes"). Beyond MAX_POOL_SIZE we take a fixed-seed uniform random
+# subsample of the pooled population before taking the percentile: a
+# percentile estimated from an i.i.d. subsample converges to the same
+# percentile of the full population (the same logic behind the common
 # "median heuristic" bandwidth estimators), so this trades a small, bounded
 # amount of estimation variance for a hard cap on memory/compute.
 DEFAULT_MAX_POOL_SIZE = 5000
@@ -181,6 +246,13 @@ def pooled_transformed_feasible(final_states: list[FinalState]) -> Optional[torc
     one ``(problem, difficulty)`` group all runs are expected to share the
     same ``tau``). Returns ``None`` if no run in the group has any feasible
     point at all.
+
+    NOTE: this pools points *across trials*, discarding which trial found
+    which point. Kept as a general-purpose point-cloud utility (and for
+    ``eps_from_pool`` below), but **no longer used by the calibration path**
+    (:func:`compute_eps_for_group`) — see the module docstring for why a
+    percentile of ``pdist`` over this pool systematically under-estimates the
+    per-trial distinguishability scale the ε-archive actually needs.
     """
     rows: list[torch.Tensor] = []
     for thresholds, Y in final_states:
@@ -204,14 +276,22 @@ def eps_from_pool(
     min_points: int = MIN_POOLED_FEASIBLE,
     max_pool_size: int = DEFAULT_MAX_POOL_SIZE,
 ) -> Optional[float]:
-    """5th-percentile (default) of strictly-positive pairwise distances.
+    """Percentile of strictly-positive pairwise distances within a point cloud.
 
     Returns ``None`` when fewer than ``min_points`` pooled points are
     available, or when every pairwise distance is zero (all points coincide).
-    When more than ``max_pool_size`` feasible points are pooled, a fixed-seed
-    uniform random subsample of that size is used instead of the full set to
-    keep the O(n^2) ``pdist`` call bounded in time/memory (see
-    ``DEFAULT_MAX_POOL_SIZE`` docstring above for the rationale).
+    When more than ``max_pool_size`` points are pooled, a fixed-seed uniform
+    random subsample of that size is used instead of the full set to keep the
+    O(n^2) ``pdist`` call bounded in time/memory (see ``DEFAULT_MAX_POOL_SIZE``
+    docstring above for the rationale).
+
+    NOTE: general-purpose point-cloud utility, kept for reuse/tests. **No
+    longer used by** :func:`compute_eps_for_group` — see the module docstring
+    ("Why not 'distance between any two pooled objective vectors, regardless
+    of trial'") for why a low percentile of this quantity, computed over a
+    cross-trial pool, was found to under-calibrate ``eps_archive`` against
+    real sweep data. Use :func:`eps_from_gaps` for the actual calibration
+    path.
     """
     n = int(pooled.shape[0])
     if n < min_points:
@@ -228,6 +308,97 @@ def eps_from_pool(
     return float(np.percentile(d, percentile))
 
 
+def _within_trial_gaps(thresholds: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+    """One trial's own "nearest-already-discovered" gap sequence.
+
+    Replays ``itcas.reporting.metrics.epsilon_archive_size_curve``'s greedy
+    insertion loop for a *single trial*, but with the ``eps`` threshold
+    removed: every strictly-feasible point (in chronological discovery order,
+    log1p-transformed exactly like ``transform_feasible_for_archive``) is
+    unconditionally treated as "discovered", and for every point after the
+    first we record its Euclidean distance to the nearest point this same
+    trial had already discovered. This produces a threshold-independent,
+    per-trial population of "how far apart are this trial's own sequential
+    discoveries" — the population the ε-archive threshold is actually applied
+    against at runtime (contrast with :func:`pooled_transformed_feasible`,
+    which mixes points across trials).
+
+    Returns a 1D tensor of length ``max(0, n_feasible - 1)`` (the first
+    feasible point of a trial has no earlier point to compare against, so
+    contributes no gap observation). Returns an empty tensor if ``Y`` has
+    fewer than 2 feasible points.
+    """
+    if Y is None or Y.numel() == 0:
+        return torch.empty(0, dtype=torch.double)
+    mask = is_feasible(Y, thresholds)
+    if not bool(mask.any()):
+        return torch.empty(0, dtype=torch.double)
+    feas = Y[mask].detach().double()  # chronological order preserved by the mask
+    disc = torch.log1p(feas - thresholds.double())
+    n = int(disc.shape[0])
+    if n < 2:
+        return torch.empty(0, dtype=torch.double)
+    # Full pairwise distance matrix for this one trial (n <= budget, <=250
+    # across the current sweep configs -- cheap; see module docstring
+    # "Scaling notes"). gaps[k-1] = distance from the (k+1)-th feasible point
+    # to its nearest predecessor among the first k feasible points.
+    D = torch.cdist(disc, disc)
+    gaps = torch.empty(n - 1, dtype=torch.double)
+    for k in range(1, n):
+        gaps[k - 1] = D[k, :k].min()
+    return gaps
+
+
+def pooled_within_trial_gaps(final_states: list[FinalState]) -> Optional[torch.Tensor]:
+    """Pool :func:`_within_trial_gaps` across every trial in ``final_states``.
+
+    This is the population :func:`eps_from_gaps` actually calibrates against.
+    Returns ``None`` if no trial in the group contributes any gap observation
+    (e.g. every trial has 0 or 1 feasible points).
+    """
+    chunks: list[torch.Tensor] = []
+    for thresholds, Y in final_states:
+        g = _within_trial_gaps(thresholds, Y)
+        if g.numel() > 0:
+            chunks.append(g)
+    if not chunks:
+        return None
+    return torch.cat(chunks, dim=0)
+
+
+def eps_from_gaps(
+    gaps: torch.Tensor,
+    *,
+    percentile: float = DEFAULT_PERCENTILE,
+    min_points: int = MIN_POOLED_FEASIBLE,
+    max_pool_size: int = DEFAULT_MAX_POOL_SIZE,
+) -> Optional[float]:
+    """Percentile (default 75th) of strictly-positive pooled within-trial gaps.
+
+    ``gaps`` is a 1D population of already-computed distances (e.g. from
+    :func:`pooled_within_trial_gaps`) — no further ``pdist`` is needed, since
+    each entry is already a single "nearest-already-discovered" distance.
+    Returns ``None`` when fewer than ``min_points`` gap observations are
+    available, or when every gap is zero (degenerate: every trial's feasible
+    points coincide). When more than ``max_pool_size`` gap observations are
+    pooled, a fixed-seed uniform random subsample of that size is used
+    instead of the full population (see ``DEFAULT_MAX_POOL_SIZE`` docstring
+    above).
+    """
+    n = int(gaps.shape[0])
+    if n < min_points:
+        return None
+    arr = gaps.cpu().numpy()
+    if n > max_pool_size:
+        rng = np.random.default_rng(_SUBSAMPLE_SEED)
+        idx = rng.choice(n, size=max_pool_size, replace=False)
+        arr = arr[idx]
+    arr = arr[arr > 0.0]
+    if arr.size == 0:
+        return None
+    return float(np.percentile(arr, percentile))
+
+
 def compute_eps_for_group(
     final_states: list[FinalState],
     *,
@@ -235,11 +406,16 @@ def compute_eps_for_group(
     min_points: int = MIN_POOLED_FEASIBLE,
     max_pool_size: int = DEFAULT_MAX_POOL_SIZE,
 ) -> Optional[float]:
-    """Calibrate ``eps_archive`` for one ``(problem, difficulty)`` group of runs."""
-    pooled = pooled_transformed_feasible(final_states)
+    """Calibrate ``eps_archive`` for one ``(problem, difficulty)`` group of runs.
+
+    Uses the within-trial-gap population (:func:`pooled_within_trial_gaps` +
+    :func:`eps_from_gaps`) — see the module docstring for why this replaced
+    the original cross-trial point-cloud population.
+    """
+    pooled = pooled_within_trial_gaps(final_states)
     if pooled is None:
         return None
-    return eps_from_pool(
+    return eps_from_gaps(
         pooled, percentile=percentile, min_points=min_points, max_pool_size=max_pool_size,
     )
 
@@ -395,9 +571,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--sweep-root", type=Path, default=_SWEEP_ROOT, help="Root of results/sweep")
     parser.add_argument("--config", type=Path, default=_EXPERIMENTS_PATH, help="configs/experiments.json to patch")
-    parser.add_argument("--percentile", type=float, default=DEFAULT_PERCENTILE, help="Percentile of pairwise distances (default 5)")
-    parser.add_argument("--min-points", type=int, default=MIN_POOLED_FEASIBLE, help="Minimum pooled feasible points to calibrate (default 10)")
-    parser.add_argument("--max-pool-size", type=int, default=DEFAULT_MAX_POOL_SIZE, help="Subsample pooled feasible points beyond this size before pdist (default 5000; caps O(n^2) memory/time)")
+    parser.add_argument("--percentile", type=float, default=DEFAULT_PERCENTILE, help="Percentile of pooled within-trial nearest-already-discovered gaps (default 75)")
+    parser.add_argument("--min-points", type=int, default=MIN_POOLED_FEASIBLE, help="Minimum pooled gap observations to calibrate (default 10)")
+    parser.add_argument("--max-pool-size", type=int, default=DEFAULT_MAX_POOL_SIZE, help="Subsample the pooled gap population beyond this size before taking the percentile (default 5000; defensive cap)")
     parser.add_argument("--problem", type=str, default=None, help="Only calibrate this problem (for testing)")
     parser.add_argument("--dry-run", action="store_true", help="Compute and print, but do not write the config file")
     args = parser.parse_args(argv)

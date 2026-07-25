@@ -40,19 +40,41 @@
 #     hour; doubled again for margin since the full sweep hasn't been run
 #     end-to-end through this script yet.
 #
-# This job WRITES for real (no --dry-run): it patches only the eps_archive
-# numeric field per (problem, difficulty) block in configs/experiments.json,
-# leaving everything else in that file (including any other pending
-# hand-edits already in the working tree) untouched.
+# By default this job WRITES for real (no --dry-run): it patches only the
+# eps_archive numeric field per (problem, difficulty) block in
+# configs/experiments.json, leaving everything else in that file (including
+# any other pending hand-edits already in the working tree) untouched.
+# Set DRY_RUN=1 to compute + print without writing (see below).
 #
 # Environment overrides (export before sbatch, or via --export):
 #   CONDA_ENV=itcas                          # conda env to activate
 #   CONDA_MODULE=Anaconda3                   # module providing conda
 #   SWEEP_ROOT=results/sweep                 # sweep root to scan
 #   CONFIG=configs/experiments.json          # config file to patch
+#   PROBLEM=""                               # if set, scope to one problem
+#                                             # (--problem <name>; for testing
+#                                             # a single sweep subtree)
+#   DRY_RUN=""                               # if set truthy (1/true/yes/on),
+#                                             # pass --dry-run: compute and
+#                                             # print per-group eps values but
+#                                             # do not write configs/experiments.json
+#   PERCENTILE=""                            # if set, pass --percentile
+#                                             # <value> (e.g. 10 or 15 to
+#                                             # demand wider spacing per
+#                                             # contexts/metrics.md); if unset,
+#                                             # the Python CLI's own default
+#                                             # (5.0) applies
 #
-# Submit:
+# Submit (default: full sweep, real write):
 #   sbatch scripts/tune_eps_archive.sbatch
+#
+# Submit scoped dry-run (single problem, no write):
+#   PROBLEM=spacecraft_formation_flying_a1 DRY_RUN=1 \
+#     sbatch --export=ALL,PROBLEM,DRY_RUN scripts/tune_eps_archive.sbatch
+#
+# Submit scoped real run at the 10th percentile:
+#   PROBLEM=spacecraft_formation_flying_a1 PERCENTILE=10 \
+#     sbatch --export=ALL,PROBLEM,PERCENTILE scripts/tune_eps_archive.sbatch
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -70,10 +92,28 @@ CONDA_ENV="${CONDA_ENV:-itcas}"
 CONDA_MODULE="${CONDA_MODULE:-Anaconda3}"
 SWEEP_ROOT="${SWEEP_ROOT:-results/sweep}"
 CONFIG="${CONFIG:-configs/experiments.json}"
+PROBLEM="${PROBLEM:-}"
+DRY_RUN="${DRY_RUN:-0}"
+PERCENTILE="${PERCENTILE:-}"
+
+# Build optional CLI args from env overrides.
+EXTRA_ARGS=()
+if [[ -n "${PROBLEM}" ]]; then
+    EXTRA_ARGS+=(--problem "${PROBLEM}")
+fi
+case "${DRY_RUN,,}" in
+    1|true|yes|on)
+        EXTRA_ARGS+=(--dry-run)
+        ;;
+esac
+if [[ -n "${PERCENTILE}" ]]; then
+    EXTRA_ARGS+=(--percentile "${PERCENTILE}")
+fi
 
 echo "===================================================================="
 echo "ITCAS eps_archive calibration | job ${SLURM_JOB_ID:-local} | host=$(hostname)"
 echo "sweep_root=${SWEEP_ROOT} config=${CONFIG} conda_env=${CONDA_ENV}"
+echo "problem=${PROBLEM:-<all>} dry_run=${DRY_RUN} percentile=${PERCENTILE:-<default:5.0>}"
 echo "start=$(date '+%Y-%m-%d %H:%M:%S')"
 echo "===================================================================="
 
@@ -95,14 +135,19 @@ THREADS="${SLURM_CPUS_PER_TASK:-4}"
 export OMP_NUM_THREADS="${THREADS}" MKL_NUM_THREADS="${THREADS}" \
        OPENBLAS_NUM_THREADS="${THREADS}" NUMEXPR_NUM_THREADS="${THREADS}"
 
-# --- Run calibration (writes configs/experiments.json for real) -----------
+# --- Run calibration (writes configs/experiments.json unless --dry-run) ---
 srun --kill-on-bad-exit=1 python -m itcas.reporting.tune_eps_archive \
     --sweep-root "${SWEEP_ROOT}" \
-    --config "${CONFIG}"
+    --config "${CONFIG}" \
+    "${EXTRA_ARGS[@]}"
 RC=$?
 
 echo "===================================================================="
 echo "[tune_eps] finished rc=${RC} at $(date '+%Y-%m-%d %H:%M:%S')"
-echo "[tune_eps] config patched: ${CONFIG}"
+if [[ " ${EXTRA_ARGS[*]} " == *" --dry-run "* ]]; then
+    echo "[tune_eps] dry run: ${CONFIG} NOT modified"
+else
+    echo "[tune_eps] config patched: ${CONFIG}"
+fi
 echo "===================================================================="
 exit "${RC}"

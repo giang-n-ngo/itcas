@@ -157,6 +157,156 @@ def test_epsilon_archive_size_uses_transformed_not_raw_distance():
     assert epsilon_archive_size(Y, thresholds=tau, eps=0.05) == 1
 
 
+def test_precompute_cached_invalidates_curve_and_auc_cache_on_eps_archive_change():
+    """Regression test for the eps_archive cache-staleness bug.
+
+    ``epsilon_archive_size`` is the one metric whose curve depends on an
+    external config value (``configs/experiments.json``'s per-(problem,
+    difficulty) ``eps_archive`` calibration, read via
+    ``itcas.reporting.metrics.eps_archive_used``/``_eps_from_experiments``)
+    rather than purely on a run's own logged data. Recalibrating that config
+    must invalidate any already-disk-cached curve/AUC for runs at that
+    (problem, difficulty) -- both the curve cache
+    (``summary._precompute_cached``, ``<problem>_curve_cache.json``) and the
+    separately-persisted AUC cache (``auc_cache.save_auc_cache``/
+    ``load_auc_cache_for_problem``, ``<problem>_auc_cache.json``, which can go
+    stale independently since ``ranking._lookup_or_compute_auc`` prefers it
+    over recomputing from a freshly-invalidated curve cache).
+
+    Also checks the cheap/common-case path is not defeated: an unchanged
+    config must still produce a pure cache hit (``compute_metric`` not
+    called again).
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import torch
+
+    from itcas.reporting import metrics as metrics_mod
+    from itcas.reporting import summary as summary_mod
+    from itcas.reporting.auc_cache import (
+        compute_auc_table,
+        load_auc_cache_for_problem,
+        save_auc_cache,
+    )
+    from itcas.reporting.metrics import RunSeries
+
+    orig_experiments_path = metrics_mod._EXPERIMENTS_PATH
+    orig_compute_metric = summary_mod.compute_metric
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiments_path = root / "experiments.json"
+
+            def write_config(eps: float) -> None:
+                # threshold_pct=0.10 below -> str(0.10) == "0.1", matching
+                # _eps_from_experiments' `diff_key = str(threshold_pct)` lookup.
+                experiments_path.write_text(json.dumps({
+                    "defaults": {"eps_archive": 0.05},
+                    "problems": {"fake_problem": {"0.1": {"eps_archive": eps}}},
+                }))
+
+            write_config(1e-6)  # very tight eps: near-duplicate points stay distinct
+            metrics_mod._EXPERIMENTS_PATH = experiments_path
+
+            thresholds = torch.tensor([-30.0, -30.0], dtype=torch.double)
+            run = RunSeries(
+                problem="fake_problem",
+                method="random",
+                run_name="fake_problem__random__p0_10_seed0",
+                seed=0,
+                thresholds=thresholds,
+                context_dims=(),
+                config={"extra": {"threshold_pct": 0.10}},
+                x_evals=[1, 2],
+                x_steps=[1, 2],
+                feasible_per_step=[[True], [True, True]],
+                X_per_step=[torch.tensor([[0.1]]), torch.tensor([[0.1], [0.2]])],
+                Y_per_step=[
+                    torch.tensor([[-1.0, -1.0]], dtype=torch.double),
+                    torch.tensor([[-1.0, -1.0], [-1.0, -1.05]], dtype=torch.double),
+                ],
+            )
+            cache_dir = root / "auc_cache"
+
+            # --- Initial computation under the tight eps. ---
+            cache1 = summary_mod._precompute_cached([run], cache_dir, "fake_problem")
+            eps_curve_tight = cache1[run.run_name]["epsilon_archive_size"]
+            assert eps_curve_tight[-1] == 2.0, "tight eps must keep both feasible points distinct"
+
+            auc_table1 = compute_auc_table([run], cache1)
+            save_auc_cache(cache_dir, "fake_problem", [run], auc_table1)
+            loaded_auc1 = load_auc_cache_for_problem(cache_dir, "fake_problem", runs=[run])
+            assert "epsilon_archive_size" in loaded_auc1[run.run_name]["evals"]
+
+            # --- Unchanged config -> pure cache hit (compute_metric skipped). ---
+            calls: list[int] = []
+
+            def spy(*a, **kw):
+                calls.append(1)
+                return orig_compute_metric(*a, **kw)
+
+            summary_mod.compute_metric = spy
+            try:
+                cache2 = summary_mod._precompute_cached([run], cache_dir, "fake_problem")
+            finally:
+                summary_mod.compute_metric = orig_compute_metric
+            assert not calls, f"expected a pure cache hit, but compute_metric ran {len(calls)} times"
+            assert cache2[run.run_name]["epsilon_archive_size"] == eps_curve_tight
+
+            loaded_auc2 = load_auc_cache_for_problem(cache_dir, "fake_problem", runs=[run])
+            assert (
+                loaded_auc2[run.run_name]["evals"]["epsilon_archive_size"]
+                == loaded_auc1[run.run_name]["evals"]["epsilon_archive_size"]
+            )
+
+            # --- Recalibrate eps_archive for this (problem, difficulty): a much
+            # looser eps must now merge the two near-duplicate feasible points. ---
+            write_config(1e6)
+            calls2: list[int] = []
+
+            def spy2(*a, **kw):
+                calls2.append(1)
+                return orig_compute_metric(*a, **kw)
+
+            summary_mod.compute_metric = spy2
+            try:
+                cache3 = summary_mod._precompute_cached([run], cache_dir, "fake_problem")
+            finally:
+                summary_mod.compute_metric = orig_compute_metric
+            assert calls2, "expected recomputation after configs/experiments.json's eps_archive changed"
+            eps_curve_loose = cache3[run.run_name]["epsilon_archive_size"]
+            assert eps_curve_loose[-1] == 1.0, "loose eps must merge the near-duplicate points"
+            assert eps_curve_loose != eps_curve_tight
+
+            # --- AUC cache half: recompute+save under the new eps, then confirm
+            # a stale on-disk AUC entry (still tagged with the old eps) is
+            # dropped wholesale rather than served, forcing a fallback to the
+            # (already-fresh) curve cache instead of silently reusing old data. ---
+            auc_table3 = compute_auc_table([run], cache3)
+            save_auc_cache(cache_dir, "fake_problem", [run], auc_table3)
+            loaded_auc3 = load_auc_cache_for_problem(cache_dir, "fake_problem", runs=[run])
+            assert (
+                loaded_auc3[run.run_name]["evals"]["epsilon_archive_size"]
+                != loaded_auc1[run.run_name]["evals"]["epsilon_archive_size"]
+            )
+
+            # Revert the config back to the tight eps *without* re-saving the
+            # AUC cache (simulating: curve cache was recomputed/fixed, but the
+            # AUC cache file on disk still reflects the now-stale loose eps).
+            write_config(1e-6)
+            loaded_auc4 = load_auc_cache_for_problem(cache_dir, "fake_problem", runs=[run])
+            assert run.run_name not in loaded_auc4, (
+                "AUC cache entry stamped with a stale eps_archive_used must be "
+                "dropped entirely, not silently served"
+            )
+    finally:
+        metrics_mod._EXPERIMENTS_PATH = orig_experiments_path
+        summary_mod.compute_metric = orig_compute_metric
+
+
 def test_tune_eps_archive_percentile_hand_checked():
     """eps_from_pool: 10 collinear points spaced by 1 -> pairwise distances
     are the integers 1..9 (distance d occurs 10-d times, 45 pairs total).
@@ -231,6 +381,139 @@ def test_tune_eps_archive_pools_log_transforms_and_filters_infeasible():
     # No feasible points anywhere in the group -> None.
     run_c = (tau, torch.tensor([[0.0, 0.0]], dtype=torch.double))
     assert pooled_transformed_feasible([run_c]) is None
+
+
+def test_tune_eps_archive_within_trial_gaps_hand_checked():
+    """_within_trial_gaps: for a single trial's own chronological feasible
+    sequence 0, 1, 3, 6 (1D, tau=0 so log1p transform is monotonic but not
+    identity -- hand-check in the transformed space directly), each new
+    point's "nearest already-discovered" distance is its gap to the closest
+    of ALL strictly earlier points in that same trial (not just the previous
+    one)."""
+    import math
+
+    import torch
+    from itcas.reporting.tune_eps_archive import _within_trial_gaps
+
+    tau = torch.tensor([0.0], dtype=torch.double)
+    Y = torch.tensor([[0.0], [1.0], [3.0], [6.0]], dtype=torch.double)
+    gaps = _within_trial_gaps(tau, Y)
+    assert gaps.shape == (3,)
+
+    t = [math.log1p(v) for v in (0.0, 1.0, 3.0, 6.0)]
+    expected = [
+        abs(t[1] - t[0]),  # point 1: only predecessor is point 0
+        min(abs(t[2] - t[0]), abs(t[2] - t[1])),  # point 2: closer to point 1
+        min(abs(t[3] - t[0]), abs(t[3] - t[1]), abs(t[3] - t[2])),  # point 3: closer to point 2
+    ]
+    assert torch.allclose(gaps, torch.tensor(expected, dtype=torch.double))
+
+    # Fewer than 2 feasible points in the trial -> no gap observations.
+    assert _within_trial_gaps(tau, torch.tensor([[5.0]], dtype=torch.double)).numel() == 0
+    assert _within_trial_gaps(tau, torch.empty(0, 1, dtype=torch.double)).numel() == 0
+    # Infeasible points are excluded from the chronological sequence before
+    # gaps are computed (mirrors transform_feasible_for_archive's own masking).
+    tau2 = torch.tensor([1.0], dtype=torch.double)
+    Y2 = torch.tensor([[2.0], [0.0], [4.0]], dtype=torch.double)  # row 1 infeasible
+    gaps2 = _within_trial_gaps(tau2, Y2)
+    assert gaps2.shape == (1,)  # only 2 of the 3 rows are feasible
+
+
+def test_tune_eps_archive_pooled_within_trial_gaps_pools_across_trials():
+    """pooled_within_trial_gaps: concatenates every trial's own
+    _within_trial_gaps, skipping trials that contribute zero gap observations
+    (e.g. a trial with only 0 or 1 feasible points) rather than erroring."""
+    import torch
+    from itcas.reporting.tune_eps_archive import pooled_within_trial_gaps
+
+    tau = torch.tensor([0.0], dtype=torch.double)
+    trial_a = (tau, torch.tensor([[0.0], [1.0], [3.0]], dtype=torch.double))  # 2 gaps
+    trial_b = (tau, torch.tensor([[10.0]], dtype=torch.double))  # 1 feasible -> 0 gaps
+    trial_c = (tau, torch.tensor([[0.0], [2.0]], dtype=torch.double))  # 1 gap
+
+    pooled = pooled_within_trial_gaps([trial_a, trial_b, trial_c])
+    assert pooled is not None
+    assert pooled.shape == (3,)  # 2 (trial_a) + 0 (trial_b) + 1 (trial_c)
+
+    # No trial contributes any gap -> None.
+    assert pooled_within_trial_gaps([trial_b]) is None
+
+
+def test_tune_eps_archive_synthetic_fixture_within_trial_gaps_fix_cross_trial_mismatch():
+    """Coordinator-requested synthetic-fixture verification of the
+    global-pool-vs-per-trial mismatch fix.
+
+    Three trials each explore the SAME shape of trajectory (three tight
+    "local refinement" clusters at 0, ~1.5, ~3.0, each 0.05-0.15 wide) but at
+    slightly different absolute offsets (0.00, 0.01, 0.02) -- mimicking
+    independent methods/seeds converging on similar regions, which is exactly
+    the pattern that produces a dense cross-trial cloud without saying
+    anything about how far apart a SINGLE trial's own genuinely-distinct
+    discoveries are.
+
+    Old approach (cross-trial pool, 5th percentile of pdist): dominated by
+    the many tiny cross-trial pairs between near-identical offset trials ->
+    tiny eps -> every within-trial gap exceeds it -> archive == positives
+    (ratio 1.0), the exact degenerate symptom this fix addresses.
+
+    New approach (within-trial-gap pool, 75th percentile): anchored on each
+    trial's OWN local-vs-jump gap structure -> lands between the small
+    "local refinement" gaps and the larger "genuinely new region" jumps ->
+    a real trial's archive collapses the 3 local clusters into ~3 distinct
+    entries (ratio well below 1, but not degenerate to a single point).
+    """
+    import torch
+    from itcas.metrics.metrics import is_feasible, transform_feasible_for_archive
+    from itcas.reporting.tune_eps_archive import (
+        compute_eps_for_group,
+        eps_from_pool,
+        pooled_transformed_feasible,
+    )
+
+    tau = torch.tensor([0.0], dtype=torch.double)
+    local_pattern = [0.0, 0.05, 0.10, 0.15, 1.5, 1.55, 1.60, 3.0]
+
+    def make_trial(offset: float):
+        Y = torch.tensor([[offset + p] for p in local_pattern], dtype=torch.double)
+        return (tau, Y)
+
+    trials = [make_trial(0.0), make_trial(0.01), make_trial(0.02)]
+
+    # Old cross-trial-pool approach: percentile of pdist over ALL trials' points.
+    pooled_pts = pooled_transformed_feasible(trials)
+    eps_old = eps_from_pool(pooled_pts, percentile=5.0, min_points=5)
+
+    # New within-trial-gap approach (the actual compute_eps_for_group path).
+    eps_new = compute_eps_for_group(trials, min_points=5)
+
+    assert eps_old is not None and eps_new is not None
+    # The old cross-trial anchor is far smaller than the new within-trial
+    # anchor -- confirms the mismatch this fix addresses.
+    assert eps_old < eps_new / 10
+
+    def archive_final(thresholds: torch.Tensor, Y: torch.Tensor, eps: float) -> tuple[int, int]:
+        mask = is_feasible(Y, thresholds)
+        disc = transform_feasible_for_archive(Y[mask], thresholds)
+        archive: list[torch.Tensor] = []
+        for k in range(disc.shape[0]):
+            y = disc[k]
+            if not archive:
+                archive.append(y)
+            else:
+                arch = torch.stack(archive)
+                d = torch.linalg.norm(arch - y.unsqueeze(0), dim=-1).min().item()
+                if d >= eps:
+                    archive.append(y)
+        return len(archive), disc.shape[0]
+
+    thresholds0, Y0 = trials[0]
+    af_old, n_pos = archive_final(thresholds0, Y0, eps_old)
+    af_new, _ = archive_final(thresholds0, Y0, eps_new)
+
+    # Old anchor: degenerate, archive == positives (the reported symptom).
+    assert af_old == n_pos
+    # New anchor: meaningfully below positives, but not collapsed to 1 point.
+    assert 1 < af_new < n_pos
 
 
 def test_tune_eps_archive_load_run_final_dedupes_steps_no_per_step_history(tmp_path=None):
@@ -491,6 +774,85 @@ def test_itcas_seq_is_continuous_and_uses_cfg_quality():
     assert info.get("quality") == "ndig"
 
 
+def test_qd_marginal_gain_kernel_ablation_invariance():
+    """disable_kernel="obj" must make the marginal gain invariant to the
+    objective-space mean (only k_ctx drives diversity); disable_kernel="ctx"
+    must make it invariant to context (only k_obj drives diversity). Without
+    any ablation, both mu and context still matter -- the sanity check that
+    the ablation actually removes something rather than being a no-op."""
+    import torch
+    from itcas.algorithms.continuous import _qd_marginal_gain
+
+    qN = torch.tensor([1.0], dtype=torch.double)
+    qB = torch.tensor([1.0], dtype=torch.double)
+    ctx_same = torch.tensor([[0.0]], dtype=torch.double)
+    ctx_far = torch.tensor([[5.0]], dtype=torch.double)
+    mu_same = torch.tensor([[0.0, 0.0]], dtype=torch.double)
+    mu_far = torch.tensor([[5.0, 5.0]], dtype=torch.double)
+
+    # disable_kernel="obj": varying mu must not change the gain.
+    g_obj_a = _qd_marginal_gain(qN, mu_same, ctx_same, qB, mu_same, ctx_same, 1.0, 1.0, "obj")
+    g_obj_b = _qd_marginal_gain(qN, mu_far, ctx_same, qB, mu_same, ctx_same, 1.0, 1.0, "obj")
+    assert torch.allclose(g_obj_a, g_obj_b)
+
+    # disable_kernel="ctx": varying context must not change the gain.
+    g_ctx_a = _qd_marginal_gain(qN, mu_same, ctx_same, qB, mu_same, ctx_same, 1.0, 1.0, "ctx")
+    g_ctx_b = _qd_marginal_gain(qN, mu_same, ctx_far, qB, mu_same, ctx_same, 1.0, 1.0, "ctx")
+    assert torch.allclose(g_ctx_a, g_ctx_b)
+
+    # No ablation: both mu and context matter (ablation is not a no-op).
+    g_full_a = _qd_marginal_gain(qN, mu_same, ctx_same, qB, mu_same, ctx_same, 1.0, 1.0, None)
+    g_full_b = _qd_marginal_gain(qN, mu_far, ctx_same, qB, mu_same, ctx_same, 1.0, 1.0, None)
+    assert not torch.allclose(g_full_a, g_full_b)
+    g_full_c = _qd_marginal_gain(qN, mu_same, ctx_far, qB, mu_same, ctx_same, 1.0, 1.0, None)
+    assert not torch.allclose(g_full_a, g_full_c)
+
+
+def test_ndig_kernel_ablation_methods_are_continuous_batch_siblings():
+    from itcas.pipeline.loop import _is_continuous_method, effective_batch_size
+
+    for base in ("ndig_no_kobj", "ndig_no_kctx"):
+        assert _is_continuous_method(base)
+        assert _is_continuous_method(base + "_batch")
+        # Bare form is a harmless sequential duplicate of itcas_seq+ndig...
+        assert effective_batch_size(base, 4) == 1
+        # ...while the _batch sibling honors the configured batch size, like
+        # every other DPP-batch sibling (c2lse_batch, bes_batch, ...).
+        assert effective_batch_size(base + "_batch", 4) == 4
+
+
+def test_ndig_kernel_ablation_end_to_end_dispatch():
+    """_select_continuous must route ndig_no_kobj_batch/ndig_no_kctx_batch to
+    plain NDIG quality with the matching disable_kernel ablation, and a
+    plain itcas run (no ablation) must come back with a None ablation tag."""
+    import torch
+    from itcas.pipeline.loop import _select_continuous, ExperimentConfig
+
+    models, bounds, tau = _tiny_gp_setup(m=2, d=2)
+    context_dims = (1,)
+
+    for method, expected_ablation in (
+        ("ndig_no_kobj_batch", "obj"),
+        ("ndig_no_kctx_batch", "ctx"),
+    ):
+        cfg = ExperimentConfig(method=method, batch_size=3, n_restarts=4, n_opt_steps=2)
+        X_new, info = _select_continuous(
+            models=models, bounds=bounds, h=tau, batch_size=3, cfg=cfg,
+            context_dims=context_dims, seed=0,
+        )
+        assert info["quality"] == "ndig"
+        assert info["diversity_kernel_ablation"] == expected_ablation
+        assert X_new.shape[0] <= 3
+
+    cfg_full = ExperimentConfig(method="itcas", quality="ndig", batch_size=2, n_restarts=4, n_opt_steps=2)
+    _, info_full = _select_continuous(
+        models=models, bounds=bounds, h=tau, batch_size=2, cfg=cfg_full,
+        context_dims=context_dims, seed=0,
+    )
+    assert info_full["quality"] == "ndig"
+    assert info_full["diversity_kernel_ablation"] is None
+
+
 def test_visualization_writes_per_metric_pdfs():
     import json
     import tempfile
@@ -559,46 +921,62 @@ def test_visualization_writes_per_metric_pdfs():
         assert any("cumulative_positives_vs_steps.pdf" in n for n in names)
 
 
-def test_batch_vs_sequential_variant_pair_and_plots():
+def test_batch_improvement_comparison_heatmap():
+    """Tiny fixture end-to-end check for ``batch_improvement_comparison.py``.
+
+    Replaces the old ``test_batch_vs_sequential_variant_pair_and_plots``
+    (tested ``batch_vs_sequential.py``'s own report-generation code, since
+    removed in favor of this heatmap report -- see
+    ``batch_vs_sequential.py``'s module docstring).
+
+    Covers 2 of the 5 families (``itcas``, ``eci``) across 2 fake problems at
+    2 difficulties, deliberately leaving:
+
+    * the other 3 families (``bes``, ``straddle``, ``moc_cas_hard``) with no
+      runs at all -- every cell in those rows must render (and compute) as
+      ``None``/grey, not a crash or a spurious 0%;
+    * the ``itcas`` family at ``p0_10`` with only its sequential side (no
+      batch sibling) -- that one cell must also be ``None``, not a division
+      error or a fabricated value;
+    * ``p0_01``/``p0_20`` entirely absent from the fixture -- those two
+      difficulty columns must render as ``None`` for every family.
+
+    ``itcas`` is set up so batch always finds a feasible point and sequential
+    never does (batch improves -> positive %, blue); ``eci`` is set up the
+    opposite way (batch regresses -> negative %, red) -- so the rendered
+    heatmap has one clearly-blue row, one clearly-red row, and three
+    all-grey rows to visually confirm the diverging colormap and the
+    grey-for-missing convention both work.
+    """
     import json
+    import shutil
+    import subprocess
     import tempfile
     from pathlib import Path
 
-    from itcas.reporting import batch_vs_sequential as bvs
-
-    families_cfg = {
-        "eci": ["cas_eci", "cas_eci_batch"],
-        "moc_cas_hard": ["moc_cas_hard", "moc_cas_hard_batch"],
-    }
-
-    seq, batch = bvs.variant_pair(families_cfg, "eci")
-    assert (seq, batch) == ("cas_eci", "cas_eci_batch")
+    from itcas.reporting import batch_improvement_comparison as bic
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        problem_dir = root / "sphere2_6d" / "p0_05"
+        problems = ["fake_problem_a", "fake_problem_b"]
 
-        def write_run(method, seed, feasible_first_step):
-            run_dir = problem_dir / method
+        def write_run(problem, diff, method, seed, feasible_first_step):
+            run_dir = root / problem / diff / method
             run_dir.mkdir(parents=True, exist_ok=True)
-            name = f"sphere2_6d__{method}__p0_05_seed{seed}"
+            name = f"{problem}__{method}__{diff}_seed{seed}"
             (run_dir / f"{name}.jsonl").write_text(
                 json.dumps({
                     "step": 1, "n_eval_total": 3, "n_eval_this_iter": 1,
                     "feasible": [feasible_first_step],
                     "x": [[0.1] * 6],
-                    # Off-diagonal (non-collinear with the two init points below) so a
-                    # feasible step actually grows the feasible convex hull volume from
-                    # zero -- otherwise every metric curve here would trivially stay at
-                    # its initial value regardless of feasibility, making the AUC-based
-                    # Wilcoxon test below vacuous (all-zero diffs, no signal to detect).
                     "y": [[-1.0, -1.5] if feasible_first_step else [-100.0, -1.0]],
                 }) + "\n"
             )
+            threshold_pct = float(diff[1:].replace("_", "."))
             (run_dir / f"{name}.summary.json").write_text(json.dumps({
                 "config": {"method": method, "n_init": 2, "seed": seed,
-                           "extra": {"threshold_pct": 0.05}},
-                "problem": "sphere2_6d",
+                           "extra": {"threshold_pct": threshold_pct}},
+                "problem": problem,
                 "n_init": 2,
                 "thresholds": [-30.0, -30.0],
                 "context_dims": [3, 4, 5],
@@ -607,82 +985,212 @@ def test_batch_vs_sequential_variant_pair_and_plots():
                 "init_feasible": [True, True],
             }))
 
-        # Batch variants of BOTH families always find a feasible point;
-        # sequential variants never do -- a clean separation across every
-        # seed so the one-sided Wilcoxon below has a real, consistent signal
-        # to detect (6 paired seeds all favoring batch).
-        for seed in range(6):
-            write_run("cas_eci", seed, feasible_first_step=False)
-            write_run("cas_eci_batch", seed, feasible_first_step=True)
-            write_run("moc_cas_hard", seed, feasible_first_step=False)
-            write_run("moc_cas_hard_batch", seed, feasible_first_step=True)
+        # "itcas" family: batch always feasible, sequential never -> batch
+        # improves (blue) at p0_05; p0_10 deliberately has only the
+        # sequential side (see docstring).
+        for problem in problems:
+            for seed in range(4):
+                write_run(problem, "p0_05", "itcas_seq_ndig", seed, feasible_first_step=False)
+                write_run(problem, "p0_05", "itcas_ndig", seed, feasible_first_step=True)
+                write_run(problem, "p0_10", "itcas_seq_ndig", seed, feasible_first_step=True)
 
-        out_dir = root / "_summary"
+        # "eci" family: sequential always feasible, batch never -> batch
+        # regresses (red), present at both p0_05 and p0_10.
+        for problem in problems:
+            for diff in ("p0_05", "p0_10"):
+                for seed in range(4):
+                    write_run(problem, diff, "cas_eci", seed, feasible_first_step=True)
+                    write_run(problem, diff, "cas_eci_batch", seed, feasible_first_step=False)
 
-        # --- Plotting: eci + moc_cas_hard are combined into one "cas" group
-        # (4 lines per panel); this problem/difficulty has no spacecraft data,
-        # so exactly one standard-difficulty PDF should be produced.
-        paths, runs_by_problem, caches_by_problem = bvs.summarize_group(
-            "cas", ["eci", "moc_cas_hard"], root, ["sphere2_6d"], families_cfg,
-            output_dir=out_dir,
+        # "bes"/"straddle"/"moc_cas_hard": no runs at all -- entire rows grey.
+
+        problems_config = root / "problems_config.json"
+        problems_config.write_text(json.dumps({"problems": problems, "temporary": []}))
+
+        out_dir = root / "out"
+        auc_cache_dir = root / "auc_cache"
+        paths = bic.summarize_batch_improvement_comparison(
+            root, output_dir=out_dir, problems_config=problems_config,
+            auc_cache_dir=auc_cache_dir,
         )
-        assert paths
-        pdfs = [p for p in paths if p.endswith(".pdf")]
-        assert pdfs, paths
-        for p in pdfs:
-            assert Path(p).exists()
-        assert len(pdfs) == 1, pdfs
-        assert Path(pdfs[0]).name == "cas_p0_05_vs_evaluations.pdf", pdfs
+        assert paths, "expected the heatmap PDF path to be returned"
+        pdf_path = Path(paths[0])
+        assert pdf_path.name == "batch_improvement_comparison_heatmap.pdf"
+        assert pdf_path.exists()
+        assert pdf_path.stat().st_size > 0
 
-        methods, styles = bvs._group_method_styles(["eci", "moc_cas_hard"], families_cfg)
-        assert methods == ["cas_eci", "cas_eci_batch", "moc_cas_hard", "moc_cas_hard_batch"]
-        # Same family shares one hue; sequential solid, batch dashed.
-        assert styles["cas_eci"]["color"] == styles["cas_eci_batch"]["color"]
-        assert styles["cas_eci"]["linestyle"] == "-"
-        assert styles["cas_eci_batch"]["linestyle"] == "--"
-        assert styles["moc_cas_hard"]["color"] == styles["moc_cas_hard_batch"]["color"]
-        assert styles["moc_cas_hard"]["linestyle"] == "-"
-        assert styles["moc_cas_hard_batch"]["linestyle"] == "--"
-        assert styles["cas_eci"]["color"] != styles["moc_cas_hard"]["color"]
+        # Curve cache should now exist for both fake problems (free re-run
+        # speedup on any later invocation -- see summary._precompute_cached).
+        assert (auc_cache_dir / "fake_problem_a_curve_cache.json").exists()
+        assert (auc_cache_dir / "fake_problem_b_curve_cache.json").exists()
 
-        # --- Statistics: one-sided Wilcoxon on area-under-product-curve,
-        # per family, reusing the runs/caches already discovered above.
-        family_reports = {}
-        family_pairs = {}
-        for fam in ("eci", "moc_cas_hard"):
-            sequential, batch_m, auc_data = bvs._family_auc_data(
-                fam, families_cfg, runs_by_problem, caches_by_problem,
-            )
-            report = bvs.build_family_stats_report(fam, sequential, batch_m, auc_data)
-            assert report.groups
-            g = next(
-                g for g in report.groups
-                if g.problem == "sphere2_6d" and g.difficulty == "p0_05"
-            )
-            assert g.pairwise, g.note
-            assert g.pairwise[0].significant, g.pairwise[0]
-            assert g.pairwise[0].effect_median_diff > 0  # batch AUC > sequential AUC
-            assert g.friedman_significant is False  # Friedman gate intentionally skipped
+        # --- Direct check of mean_auc_lists_over_rows + the pct-change
+        # aggregation, independent of the rendered PDF, so a rendering bug
+        # can't mask an aggregation bug or vice versa.
+        from itcas.reporting.batch_vs_sequential import _collect_family_runs, _rows_by_problem
+        from itcas.reporting.ranking import mean_auc_lists_over_rows
+        from itcas.reporting.summary import _precompute_cached
 
-            json_p, md_p = bvs.write_family_stats_report(report, fam, sequential, batch_m, out_dir)
-            assert json_p.exists() and md_p.exists()
-            md_text = md_p.read_text()
-            assert "one-sided" in md_text.lower()
-            assert "friedman" in md_text.lower()
+        runs_by_problem = _collect_family_runs(root, problems, bic.ALL_METHODS)
+        caches_by_problem = {
+            p: _precompute_cached(rs, auc_cache_dir, p) for p, rs in runs_by_problem.items() if rs
+        }
+        rows_p05 = _rows_by_problem(problems, runs_by_problem, caches_by_problem, "p0_05")
+        assert rows_p05
+        means_p05 = mean_auc_lists_over_rows(rows_p05, bic.ALL_METHODS, "evals")
+        assert "cumulative_positives" in means_p05
+        itcas_seq_means = means_p05["cumulative_positives"]["itcas_seq_ndig"]
+        itcas_batch_means = means_p05["cumulative_positives"]["itcas_ndig"]
+        assert len(itcas_seq_means) == 2 and len(itcas_batch_means) == 2  # one per fake problem
+        assert sum(itcas_batch_means) > sum(itcas_seq_means)  # batch has more positives
 
-            family_reports[fam] = report
-            family_pairs[fam] = (sequential, batch_m)
-
-        # --- SUMMARY.md synthesis
-        summary_path = bvs.write_overall_summary(
-            family_reports, family_pairs, ["sphere2_6d"], out_dir,
+        pct = bic._pct_change_by_column(
+            {"p0_05": means_p05}, {"cumulative_positives": True, "product": True},
         )
-        assert summary_path.exists()
-        summary_text = summary_path.read_text()
-        assert "Overall conclusion" in summary_text
-        assert "sphere2_6d" in summary_text
-        assert "eci" in summary_text and "moc_cas_hard" in summary_text
-        assert "batch significantly outperforms sequential" in summary_text
+        itcas_pct = pct["cumulative_positives"]["itcas"]["p0_05"]
+        assert itcas_pct is not None and itcas_pct > 0  # batch improved -> positive %
+        eci_pct = pct["cumulative_positives"]["eci"]["p0_05"]
+        assert eci_pct is not None and eci_pct < 0  # batch regressed -> negative %
+        for fam_key in ("bes", "straddle", "moc_cas_hard"):
+            assert pct["cumulative_positives"][fam_key]["p0_05"] is None
+        # Difficulty columns absent from the fixture entirely.
+        for fam_key in ("itcas", "bes", "straddle", "eci", "moc_cas_hard"):
+            assert pct["cumulative_positives"][fam_key]["p0_01"] is None
+            assert pct["cumulative_positives"][fam_key]["p0_20"] is None
+
+        # The deliberately one-sided "itcas" cell at p0_10 (sequential-only,
+        # no batch runs) must be None, not a crash or a spurious value.
+        rows_p10 = _rows_by_problem(problems, runs_by_problem, caches_by_problem, "p0_10")
+        means_p10 = mean_auc_lists_over_rows(rows_p10, bic.ALL_METHODS, "evals")
+        pct_p10 = bic._pct_change_by_column(
+            {"p0_10": means_p10}, {"cumulative_positives": True, "product": True},
+        )
+        assert pct_p10["cumulative_positives"]["itcas"]["p0_10"] is None
+        # "eci" is fully present at p0_10 too -- same direction as p0_05.
+        assert pct_p10["cumulative_positives"]["eci"]["p0_10"] is not None
+        assert pct_p10["cumulative_positives"]["eci"]["p0_10"] < 0
+
+        # --- Render readback: convert the PDF's first page to PNG (cheap on
+        # a few-KB one-figure PDF) as a genuinely fast, zero-extra-Python-
+        # dependency visual sanity check.
+        if shutil.which("pdftoppm"):
+            png_prefix = root / "heatmap_preview"
+            subprocess.run(
+                ["pdftoppm", "-png", "-r", "50", str(pdf_path), str(png_prefix)],
+                check=True, capture_output=True,
+            )
+            pngs = list(root.glob("heatmap_preview*.png"))
+            assert pngs, "pdftoppm produced no output"
+            assert pngs[0].stat().st_size > 0
+
+
+def test_ndig_comparison_relative_auc_grid():
+    """Tiny fixture end-to-end check for the rewritten ``ndig_comparison.py``.
+
+    Covers the two things that changed: the report now shows only
+    ``itcas_ndig``/``itcas_seq_ndig`` (``cr_ndig`` dropped entirely), and its
+    relative-AUC ratio is computed against the denominator *pool*
+    ``ranking.relative_auc_seed_ratios_for_row``'s new ``pool_methods``
+    parameter exposes -- every ``summary.SYNTHETIC_METHODS`` method, not just
+    the two plotted ones.
+
+    Fixture: 2 fake synthetic problems at 2 difficulties (``p0_05``,
+    ``p0_10``). ``itcas_ndig``/``itcas_seq_ndig`` each get one feasible step;
+    ``random`` (present only as a pool method, never plotted) gets three
+    feasible steps in a row, so its cumulative-positives curve pointwise
+    dominates both plotted methods' -- guaranteeing ``random`` has the larger
+    AUC in every row. That makes the pool-vs-plotted-only distinction
+    directly observable: computed against the full synthetic-comparison pool
+    (which includes ``random``), both plotted methods' ratios must be < 1.0;
+    computed with no pool override (denominator = the two plotted methods
+    only), the larger of the two must hit exactly 1.0.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from itcas.reporting import ndig_comparison as nc
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        problems = ["fake_problem_a", "fake_problem_b"]
+
+        def write_run(problem, diff, method, seed, feasible_steps):
+            run_dir = root / problem / diff / method
+            run_dir.mkdir(parents=True, exist_ok=True)
+            name = f"{problem}__{method}__{diff}_seed{seed}"
+            n_eval_total = 2
+            lines = []
+            for i, feasible in enumerate(feasible_steps):
+                n_eval_total += 1
+                lines.append(json.dumps({
+                    "step": i + 1, "n_eval_total": n_eval_total, "n_eval_this_iter": 1,
+                    "feasible": [feasible],
+                    "x": [[0.1] * 6],
+                    "y": [[-1.0, -1.5] if feasible else [-100.0, -1.0]],
+                }))
+            (run_dir / f"{name}.jsonl").write_text("\n".join(lines) + "\n")
+            threshold_pct = float(diff[1:].replace("_", "."))
+            (run_dir / f"{name}.summary.json").write_text(json.dumps({
+                "config": {"method": method, "n_init": 2, "seed": seed,
+                           "extra": {"threshold_pct": threshold_pct}},
+                "problem": problem,
+                "n_init": 2,
+                "thresholds": [-30.0, -30.0],
+                "context_dims": [3, 4, 5],
+                "init_X": [[0.0] * 6, [0.1] * 6],
+                "init_Y": [[-1.0, -1.0], [-2.0, -2.0]],
+                "init_feasible": [True, True],
+            }))
+
+        for problem in problems:
+            for diff in ("p0_05", "p0_10"):
+                for seed in range(4):
+                    write_run(problem, diff, "itcas_ndig", seed, feasible_steps=[True])
+                    write_run(problem, diff, "itcas_seq_ndig", seed, feasible_steps=[True])
+                    write_run(problem, diff, "random", seed, feasible_steps=[True, True, True])
+
+        problems_config = root / "problems_config.json"
+        problems_config.write_text(json.dumps({"problems": problems, "temporary": []}))
+
+        # --- Direct check of the pool-vs-plotted distinction, independent of
+        # the rendered PDF.
+        from itcas.reporting import ranking
+        from itcas.reporting.batch_vs_sequential import _collect_family_runs, _rows_by_problem
+        from itcas.reporting.summary import _precompute_cached
+
+        auc_cache_dir = root / "auc_cache"
+        runs_by_problem = _collect_family_runs(root, problems, nc._ALL_NEEDED_METHODS)
+        caches_by_problem = {
+            p: _precompute_cached(rs, auc_cache_dir, p) for p, rs in runs_by_problem.items() if rs
+        }
+        rows = []
+        for diff in nc.DIFFICULTIES:
+            rows.extend(_rows_by_problem(problems, runs_by_problem, caches_by_problem, diff))
+        assert rows
+
+        pooled = ranking.relative_auc_ratio_lists_over_rows(
+            rows, list(nc.METHODS), "evals", pool_methods=list(nc.POOL_METHODS),
+        )
+        pooled_ratios = pooled["cumulative_positives"]
+        assert max(pooled_ratios[nc.PROPOSED_METHOD]) < 1.0
+        assert max(pooled_ratios[nc.OTHER_METHOD]) < 1.0
+
+        unpooled = ranking.relative_auc_ratio_lists_over_rows(rows, list(nc.METHODS), "evals")
+        unpooled_ratios = unpooled["cumulative_positives"]
+        assert max(max(unpooled_ratios[nc.PROPOSED_METHOD]), max(unpooled_ratios[nc.OTHER_METHOD])) == 1.0
+
+        # --- End-to-end: the module produces exactly one PDF, correctly named.
+        out_dir = root / "out"
+        paths = nc.summarize_ndig_comparison(
+            root, problems_config=problems_config, output_dir=out_dir,
+            auc_cache_dir=auc_cache_dir,
+        )
+        assert len(paths) == 1
+        pdf_path = Path(paths[0])
+        assert pdf_path.name == "ndig_comparison_relative_auc_vs_synthetic_benchmarks.pdf"
+        assert pdf_path.exists()
+        assert pdf_path.stat().st_size > 0
 
 
 def test_forward_fill_at_carries_last_known_value():
@@ -1334,6 +1842,81 @@ def test_straddle_then_sample_stage_flips_in_jsonl_log():
         assert stages[4:] == ["interior"] * 4, stages
 
 
+def test_to_jsonable_rounds_floats_to_sig_figs():
+    """Guards the disk-space fix in itcas/io/logger.py: every float that goes
+    through _to_jsonable (i.e. everything RunLogger writes) must come out at
+    _SIG_FIGS significant figures, however deeply nested or wrapped in a
+    tensor. Regressing this silently re-inflates results/sweep by ~1GB+."""
+    import math
+    import torch
+
+    from itcas.io.logger import _to_jsonable, _SIG_FIGS
+
+    x = 0.123456789012345
+    rounded = _to_jsonable(x)
+    assert rounded == float(f"{x:.{_SIG_FIGS}g}")
+    # Significant figures, not decimal places: a big number keeps the same
+    # relative precision rather than being truncated to ~6 decimals.
+    big = 123456789.123456
+    assert _to_jsonable(big) == float(f"{big:.{_SIG_FIGS}g}")
+
+    # Nested containers and tensors are rounded too.
+    nested = {"x": [[x, big]], "y": (x, {"z": x})}
+    out = _to_jsonable(nested)
+    assert out["x"][0][0] == float(f"{x:.{_SIG_FIGS}g}")
+    assert out["y"][1]["z"] == float(f"{x:.{_SIG_FIGS}g}")
+    tensor_out = _to_jsonable(torch.tensor([x, big], dtype=torch.double))
+    assert tensor_out == [float(f"{x:.{_SIG_FIGS}g}"), float(f"{big:.{_SIG_FIGS}g}")]
+
+    # Non-float types pass through untouched.
+    assert _to_jsonable(3) == 3
+    assert _to_jsonable("s") == "s"
+    assert _to_jsonable(True) is True
+    assert _to_jsonable(None) is None
+
+    # Edge cases: zero, negatives, NaN/inf must not error or become 0/garbage.
+    assert _to_jsonable(0.0) == 0.0
+    assert _to_jsonable(-x) == -float(f"{x:.{_SIG_FIGS}g}")
+    assert math.isnan(_to_jsonable(float("nan")))
+    assert _to_jsonable(float("inf")) == float("inf")
+
+
+def test_run_logger_writes_rounded_floats_to_disk():
+    """End-to-end: RunLogger.log_iter/finalize must persist rounded floats,
+    not just round in memory -- catches a regression where someone bypasses
+    _to_jsonable when writing the JSONL/summary payload."""
+    import json
+    import re
+    import tempfile
+    from pathlib import Path
+
+    from itcas.io.logger import RunLogger, _SIG_FIGS
+
+    full_precision = 0.256708264350891171234
+    with tempfile.TemporaryDirectory() as tmp:
+        logger = RunLogger(tmp, "precision_test")
+        logger.log_iter({"iter": 0, "x": [[full_precision]]})
+        logger.finalize({"final": full_precision})
+
+        jsonl_line = Path(tmp, "precision_test.jsonl").read_text().strip()
+        summary_text = Path(tmp, "precision_test.summary.json").read_text()
+
+        rec = json.loads(jsonl_line)
+        assert rec["x"][0][0] == float(f"{full_precision:.{_SIG_FIGS}g}")
+        summary = json.loads(summary_text)
+        assert summary["final"] == float(f"{full_precision:.{_SIG_FIGS}g}")
+
+        # Also check the on-disk text itself never carries more significant
+        # digits than _SIG_FIGS, so a future _to_jsonable that rounds the
+        # float in memory but then re-expands it via repr() still gets caught.
+        for text in (jsonl_line, summary_text):
+            for digits in re.findall(r"\d*\.\d+|\d+", text):
+                digits_no_zero = digits.lstrip("0") or "0"
+                assert len(digits_no_zero.replace(".", "").lstrip("0")) <= _SIG_FIGS, (
+                    f"found a number with too many significant digits: {digits!r} in {text!r}"
+                )
+
+
 def test_smooth_margin_recovers_min_as_gamma_to_zero():
     import torch
 
@@ -1719,8 +2302,8 @@ def test_synthetic_comparison_split_pipeline_matches_monolithic():
             a, b = combined_in_memory[d], combined_from_disk[d]
             assert a["n_rows"] == b["n_rows"]
             assert [s.key for s in a["metrics_present"]] == [s.key for s in b["metrics_present"]]
-            assert a["avg_rank"] == b["avg_rank"]
-            assert a["relative_auc"] == b["relative_auc"]
+            assert a["avg_rank_lists"] == b["avg_rank_lists"]
+            assert a["relative_auc_lists"] == b["relative_auc_lists"]
             assert a["auc_by_problem"] == b["auc_by_problem"]
 
 
@@ -1833,6 +2416,7 @@ if __name__ == "__main__":
     test_fill_distance_metrics()
     test_objective_diversity_metrics()
     test_epsilon_archive_size_uses_transformed_not_raw_distance()
+    test_precompute_cached_invalidates_curve_and_auc_cache_on_eps_archive_change()
     test_tune_eps_archive_percentile_hand_checked()
     test_tune_eps_archive_caps_pdist_via_subsampling()
     test_tune_eps_archive_pools_log_transforms_and_filters_infeasible()
@@ -1859,6 +2443,8 @@ if __name__ == "__main__":
     test_resolve_device_specs()
     test_sample_uniform_device_and_reproducibility()
     test_synthetic_comparison_split_pipeline_matches_monolithic()
+    test_batch_improvement_comparison_heatmap()
+    test_ndig_comparison_relative_auc_grid()
     test_run_lock_prevents_concurrent_runs()
     test_evaluate_true_matches_input_device_and_dtype()
     test_casd_sample_uniform_health_check_retries_then_succeeds()
@@ -1878,4 +2464,6 @@ if __name__ == "__main__":
     test_two_stage_effective_batch_size_and_is_batch_method()
     test_two_stage_baselines_registered_in_baseline_registry()
     test_straddle_then_sample_stage_flips_in_jsonl_log()
+    test_to_jsonable_rounds_floats_to_sig_figs()
+    test_run_logger_writes_rounded_floats_to_disk()
     print("OK: smoke unit tests passed.")

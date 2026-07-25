@@ -1,72 +1,101 @@
-"""Full ITCAS/NDIG (batch) vs its two sequential NDIG siblings.
+"""NDIG (sequential) vs NDIG-B (batch): relative-AUC-vs-synthetic-benchmarks comparison.
 
-Compares three methods that all optimize the same NDIG quality signal but
-differ in how points are selected:
+Narrow, single-purpose report comparing exactly two methods -- both use the
+NDIG quality signal, differing only in whether points are selected in a
+batch or one at a time:
 
-* ``itcas_ndig`` -- the proposed method: full ITCAS (QD-DPP greedy batch
-  selection, honors ``--batch_size``), quality=``ndig``. Parsed label for
-  ``method="itcas", quality="ndig"`` (see ``visualize._load_run``); on disk
-  under ``itcas/ndig``.
-* ``itcas_seq_ndig`` -- ``itcas_seq``, the forced-sequential sibling: same
-  NDIG quality machinery and multistart optimizer as ``itcas``, but always
+* ``itcas_ndig`` -- **"NDIG-B"**, the proposed method: full ITCAS (QD-DPP
+  greedy batch selection, honors ``--batch_size``), quality=``ndig``. Parsed
+  label for ``method="itcas", quality="ndig"`` (see
+  ``visualize._load_run``); on disk under ``itcas/ndig``.
+* ``itcas_seq_ndig`` -- **"NDIG"**, the forced-sequential sibling: same NDIG
+  quality machinery and multistart optimizer as ``itcas_ndig``, but always
   ``batch_size=1`` regardless of the config's ``batch_size``. On disk under
   ``itcas_seq/ndig``.
-* ``cr_ndig`` -- Context-Repulsive NDIG (``contexts/sequential_ndig.md``): a
-  purely-sequential variant with its own fixed quality (repulsion penalty
-  against acquisition history) instead of QD-DPP batch diversity. On disk as
-  ``cr_ndig`` (no quality suffix -- ``cr_ndig`` is not ``itcas``/``itcas_seq``
-  so ``visualize._load_run`` never appends one).
 
-Like :mod:`itcas.reporting.batch_vs_sequential` (whose module docstring this
-mirrors), ``itcas_ndig`` logs one record per algorithmic step of up to
-``batch_size`` individually-evaluated points, while its two sequential
-siblings log one record per individual evaluation -- so **total individual
-evaluations** (``RunSeries.x_evals``) is the only meaningful shared x-axis,
-for both the plots and the statistical testing below (``x_steps`` would
-silently rescale the sequential methods' x-axis by a factor the batch method
-doesn't share).
+``cr_ndig`` (Context-Repulsive NDIG, a third method the previous version of
+this report also compared against) is deliberately dropped -- this report
+only ever shows the two methods above (see :data:`METHODS`, and
+:data:`itcas.reporting.method_labels.METHOD_ABBREVIATIONS` for both methods'
+short display labels, both already registered there).
 
-Plots reuse :mod:`itcas.reporting.batch_vs_sequential`'s generic (non-family-
-specific) discovery/grid-layout helpers directly, mirroring the layout
-:func:`itcas.reporting.summary.summarize_synthetic_comparison` settled on --
-one PDF per row rather than one combined grid, plus two standalone
-cross-row summary figures:
+**The one output: a 2x2 relative-AUC boxplot.** A single PDF
+(``ndig_comparison_relative_auc_vs_synthetic_benchmarks.pdf``) via
+:func:`itcas.reporting.ranking.relative_auc_ratio_lists_over_rows` and
+:func:`itcas.reporting.summary._plot_relative_auc_box_grid_figure`: a 2x2
+grid, one panel per metric (**no product panel** -- exactly the four metrics
+:func:`itcas.reporting.summary._ordered_metrics` registers, never five), each
+panel a horizontal boxplot with one box per method (``itcas_ndig``,
+``itcas_seq_ndig``) showing that method's relative-AUC ratio spread. This
+replaces the previous version's curve-grid PDFs, avg-rank figure, and
+Friedman/Wilcoxon stats report entirely -- this module now produces exactly
+one figure, mirroring :mod:`itcas.reporting.batch_improvement_comparison`'s
+single-purpose-report convention rather than the full per-problem/
+per-difficulty pipeline ``batch_vs_sequential``-derived reports use.
 
-* One single-row PDF per problem (for the "standard" difficulties) or per
-  difficulty level (for each real-world problem, e.g.
-  ``spacecraft_formation_flying_a1``, ``casd_llm`` -- see
-  ``batch_vs_sequential._REAL_WORLD_PROBLEMS``): metric curves +
-  raw product, no product-rank column (``include_product_rank_column=
-  False`` -- that per-iteration "who's ahead right now" column only made
-  sense across a shared grid; split one-row-per-PDF it adds nothing beyond
-  the curves already shown).
-* One standalone **average-rank** figure per difficulty (standard) or for
-  the whole spacecraft problem: each method's average rank (1 = best) per
-  metric + product, averaged across that difficulty's rows, via
-  :func:`itcas.reporting.ranking.average_ranks_over_rows` and
-  :func:`itcas.reporting.summary._plot_avg_rank_figure`.
-* One standalone **relative-AUC ("relative ranking")** figure alongside it:
-  for each metric (+ product), every (method, seed) AUC divided by the best
-  AUC seen anywhere in that row, averaged over seeds then over rows, via
-  :func:`itcas.reporting.ranking.relative_auc_ratios_over_rows` and
-  :func:`itcas.reporting.summary._plot_relative_auc_figure`.
+Every panel draws NDIG (``itcas_seq_ndig``) above NDIG-B (``itcas_ndig``) in
+that fixed order (:data:`PLOT_ORDER`, ``sort_by_mean=False`` -- not sorted by
+which one scores higher in that particular panel), and has no per-panel
+y-tick method labels (``show_labels=False``): since the same two methods
+repeat in all four panels, their names/colors are shown once, via a single
+legend shared across the whole figure, rather than four times. The x-axis
+has no numeric label either -- the whole figure gets one shared caption,
+``"Avg relative AUC across synthetic problems and difficulty (1.0 = best)"``,
+via ``fig.text`` below the legend.
 
-Statistics: unlike ``batch_vs_sequential`` (which only ever has two
-conditions per family and therefore skips the Friedman gate), this report has
-three methods, so it goes through the full pipeline in
-:mod:`itcas.reporting.stats` (:func:`~itcas.reporting.stats.run_stats`):
-per (problem, difficulty), a Friedman omnibus test over all three methods
-gates a Holm-Bonferroni corrected one-sided paired Wilcoxon test
-(``H1: itcas_ndig > baseline``) against each of ``itcas_seq_ndig`` and
-``cr_ndig`` individually. The per-seed scalar under test is the **area under
-the point-wise product curve** (:func:`itcas.reporting.summary._compute_seed_product_curve`
-integrated via :func:`itcas.reporting.summary._curve_area`), exactly the
-convention ``batch_vs_sequential`` uses for the same batch-vs-sequential axis
-mismatch -- higher is better throughout (FCFD contributes as a reciprocal).
-This module writes its own Markdown renderer rather than
-``stats.report_to_markdown`` because that renderer's prose assumes the
-opposite ("lower is better") direction; the underlying Wilcoxon computation
-itself (``H1: proposed > baseline``) is direction-agnostic and reused as-is.
+**"Relative to all methods shown in synthetic comparison."** Per (problem,
+difficulty) row, the ratio's denominator -- the "best AUC seen anywhere in
+this row" -- is taken not just over the two plotted methods but over every
+method :mod:`itcas.reporting.summary`'s synthetic-comparison pipeline shows
+(:data:`itcas.reporting.summary.SYNTHETIC_METHODS`: ``itcas_ndig``,
+``random``, ``straddle_then_sample_lse10``, ``bes_then_sample_lse10``,
+``cas_eci``, ``moc_cas_hard`` -- six methods, not including
+``itcas_seq_ndig``, which is not part of that comparison). This is exactly
+what :func:`itcas.reporting.ranking.relative_auc_seed_ratios_for_row`'s
+``pool_methods`` parameter (added alongside this report) is for: the
+denominator pool (:data:`POOL_METHODS`) and the reported/plotted methods
+(:data:`METHODS`) are passed separately, so a ratio of 1.0 means "matched the
+best AUC any of the six synthetic-comparison methods achieved in that row" --
+not merely "matched the better of NDIG/NDIG-B". Run discovery therefore
+covers the union of both sets (see :data:`_ALL_NEEDED_METHODS`), even though
+only :data:`METHODS` ever appears in the output.
+
+**Rows: every synthetic problem, every shared difficulty, pooled into one
+figure.** :func:`itcas.reporting.summary._synthetic_problems` (default
+``configs/final_problems.json``, excludes the two real-world problems) times
+the four shared standard-problem difficulty levels
+(``p0_01``/``p0_05``/``p0_10``/``p0_20``, via
+``batch_vs_sequential._rows_by_problem`` -- the "standard layout": one row
+per problem at a fixed difficulty). Unlike
+:mod:`itcas.reporting.summary`'s own synthetic-comparison pipeline (which
+renders one relative-AUC figure per difficulty), this report pools every
+difficulty's rows into a single list before computing ratios, so each box's
+per-row ratio list has one entry per (problem, difficulty) pair -- one
+overall summary figure rather than four.
+
+**Axis.** ``itcas_ndig`` is the only batch method between the pair (one
+record per algorithmic step of up to ``batch_size`` individually-evaluated
+points); ``itcas_seq_ndig`` logs one record per individual evaluation. As in
+:mod:`itcas.reporting.batch_vs_sequential` (whose module docstring this
+mirrors), that makes **total individual evaluations** (``RunSeries.x_evals``)
+the only fair shared x-axis -- this report only ever uses ``_AXIS = "evals"``.
+
+**No statistics.** Like :mod:`itcas.reporting.batch_improvement_comparison`,
+this is a single descriptive figure; it does not run the Friedman/Wilcoxon
+pipeline the previous three-method version of this report used.
+
+**AUC caching.** Curves are cached via
+:func:`itcas.reporting.summary._precompute_cached` (same
+``auc_cache_dir``/default-location convention as
+``ff_comparison.py``/``casd_comparison.py``/``batch_improvement_comparison.py``).
+The per-seed AUC scalar cache (:mod:`itcas.reporting.auc_cache`) is
+deliberately **not** wired into the ``ranking.py`` call here, for the same
+reason :mod:`itcas.reporting.batch_improvement_comparison` omits it: this
+report's rows span multiple problems at once, and that cache's ``run_name``
+keys are only unique *within* one problem's own cache file -- merging them
+across problems risks a same-named run from a different problem silently
+returning the wrong cached AUC (see that module's docstring, "AUC caching"
+section, for the full argument).
 """
 from __future__ import annotations
 
@@ -75,282 +104,97 @@ from pathlib import Path
 from typing import Optional
 
 from . import ranking
-from .batch_vs_sequential import (
-    _AXIS,
-    _REAL_WORLD_PROBLEMS,
-    _collect_family_runs,
-    _collect_product_auc_for_stats,
-    _difficulties_present,
-    _rows_by_difficulty,
-    _rows_by_problem,
-    load_problems,
-    plot_group_grid,
-)
-from .stats import GroupResult, StatsReport, _fmt, _sig_marker, report_to_json, run_stats
+from .batch_vs_sequential import _collect_family_runs, _rows_by_problem
+from .method_labels import METHOD_ABBREVIATIONS
 from .summary import (
-    CurveCache,
+    SYNTHETIC_METHODS,
     _metrics_present_in_rows,
-    _plot_avg_rank_figure,
-    _plot_relative_auc_figure,
-    _precompute,
+    _precompute_cached,
+    _plot_relative_auc_box_grid_figure,
+    _synthetic_problems,
 )
 
 _DEFAULT_PROBLEMS_CONFIG = "configs/final_problems.json"
 _DEFAULT_OUTPUT_DIR = "results/ndig_comparison"
+_AXIS = "evals"  # the only axis this report ever plots -- see module docstring.
 
-PROPOSED_METHOD = "itcas_ndig"
-BASELINE_METHODS: tuple[str, ...] = ("itcas_seq_ndig", "cr_ndig")
-METHODS: tuple[str, ...] = (PROPOSED_METHOD,) + BASELINE_METHODS
+# The shared "standard problem" difficulty scale -- see module docstring's
+# "Rows" section. NOT the FF/CASD reports' own per-problem scales.
+DIFFICULTIES: tuple[str, ...] = ("p0_01", "p0_05", "p0_10", "p0_20")
 
-# Stable hue per method (tab10), all solid -- these are three distinct
-# algorithms (not a sequential/batch pair sharing one family), so there is no
-# "same color different linestyle" pairing to preserve here.
+PROPOSED_METHOD = "itcas_ndig"       # "NDIG-B"
+OTHER_METHOD = "itcas_seq_ndig"      # "NDIG"
+METHODS: tuple[str, ...] = (PROPOSED_METHOD, OTHER_METHOD)
+
+# Denominator pool for the relative-AUC ratio: every method
+# summary.py's synthetic-comparison pipeline shows -- see module docstring's
+# "Relative to all methods shown in synthetic comparison" section.
+POOL_METHODS: tuple[str, ...] = SYNTHETIC_METHODS
+
+# Runs actually discovered on disk: the union of what's plotted and what's
+# needed for the denominator pool (itcas_seq_ndig is in METHODS but not
+# POOL_METHODS; itcas_ndig is in both).
+_ALL_NEEDED_METHODS: list[str] = sorted(set(METHODS) | set(POOL_METHODS))
+
+# Fixed top-to-bottom box order for the 2x2 figure -- NDIG always above
+# NDIG-B, regardless of which one scores higher in a given panel (see module
+# docstring's "The one output" section). Only the plot call uses this; every
+# other use of the method set (run discovery, the ratio computation itself)
+# is order-independent and keeps using METHODS/PROPOSED_METHOD-first.
+PLOT_ORDER: tuple[str, ...] = (OTHER_METHOD, PROPOSED_METHOD)
+
 _METHOD_STYLES: dict[str, dict] = {
     PROPOSED_METHOD: {"color": "#1f77b4", "linestyle": "-"},
-    "itcas_seq_ndig": {"color": "#ff7f0e", "linestyle": "-"},
-    "cr_ndig": {"color": "#2ca02c", "linestyle": "-"},
+    OTHER_METHOD: {"color": "#ff7f0e", "linestyle": "-"},
 }
 
 
-# ---------------------------------------------------------------------------
-# Plots
-# ---------------------------------------------------------------------------
-def _emit_row_pdfs(
-    rows: list,
-    row_kind: str,
-    out_dir: Path,
-    file_prefix: str,
-    title_prefix: str,
-) -> list[str]:
-    """One single-row PDF per entry in ``rows`` (see module docstring)."""
-    paths: list[str] = []
-    for row_label, row_runs, row_cache in rows:
-        title = f"{title_prefix} -- {row_label} ({row_kind}) vs total individual evaluations"
-        out_path = out_dir / f"{file_prefix}_{row_label}_vs_evaluations.pdf"
-        ok = plot_group_grid(
-            list(METHODS), _METHOD_STYLES, [(row_label, row_runs, row_cache)], title, out_path,
-            include_product_rank_column=False,
-        )
-        if ok is not None:
-            paths.append(str(ok))
-    return paths
-
-
-def _emit_rank_summary_pdfs(
-    rows: list,
-    out_dir: Path,
-    file_prefix: str,
-) -> list[str]:
-    """The standalone average-rank + relative-AUC ("relative ranking") PDFs across ``rows``."""
-    paths: list[str] = []
-    metrics_present = _metrics_present_in_rows(rows)
-
-    avg_rank_row = ranking.average_ranks_over_rows(rows, list(METHODS), _AXIS)
-    avg_rank_path = out_dir / f"{file_prefix}_avg_rank_vs_evaluations.pdf"
-    ok = _plot_avg_rank_figure(
-        avg_rank_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
-        avg_rank_path,
-    )
-    if ok is not None:
-        paths.append(str(ok))
-
-    relative_auc_row = ranking.relative_auc_ratios_over_rows(rows, list(METHODS), _AXIS)
-    relative_auc_path = out_dir / f"{file_prefix}_relative_auc_vs_evaluations.pdf"
-    ok = _plot_relative_auc_figure(
-        relative_auc_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
-        relative_auc_path,
-    )
-    if ok is not None:
-        paths.append(str(ok))
-
-    return paths
-
-
-def summarize_plots(
-    input_dir: str | Path,
-    problems: list[str],
-    output_dir: str | Path,
-) -> tuple[list[str], dict[str, list], dict[str, CurveCache]]:
-    """Produce the PDFs (see module docstring). Returns ``(paths, runs_by_problem, caches_by_problem)``.
-
-    The latter two are returned so the stats step below can reuse the same
-    discovered runs / precomputed metric curves instead of re-reading logs.
-    """
-    input_path = Path(input_dir)
-    out_dir = Path(output_dir)
-
-    runs_by_problem = _collect_family_runs(input_path, problems, list(METHODS))
-    caches_by_problem = {p: _precompute(runs) for p, runs in runs_by_problem.items() if runs}
-
-    paths: list[str] = []
-    title_prefix = "itcas_ndig vs itcas_seq_ndig vs cr_ndig"
-
-    standard_problems = [p for p in problems if p not in _REAL_WORLD_PROBLEMS]
-    standard_runs = {p: runs_by_problem.get(p, []) for p in standard_problems}
-    for diff in _difficulties_present(standard_runs):
-        rows = _rows_by_problem(standard_problems, standard_runs, caches_by_problem, diff)
-        if not rows:
-            continue
-        paths.extend(
-            _emit_row_pdfs(rows, diff, out_dir, f"ndig_comparison_{diff}", title_prefix)
-        )
-        paths.extend(
-            _emit_rank_summary_pdfs(rows, out_dir, f"ndig_comparison_{diff}")
-        )
-
-    for rw_problem in _REAL_WORLD_PROBLEMS:
-        if rw_problem not in problems:
-            continue
-        rw_runs = runs_by_problem.get(rw_problem, [])
-        rw_cache = caches_by_problem.get(rw_problem, {})
-        rows = _rows_by_difficulty(rw_runs, rw_cache)
-        if rows:
-            file_prefix = f"ndig_comparison_{rw_problem}"
-            paths.extend(
-                _emit_row_pdfs(rows, rw_problem, out_dir, file_prefix, title_prefix)
-            )
-            paths.extend(
-                _emit_rank_summary_pdfs(rows, out_dir, file_prefix)
-            )
-
-    return paths, runs_by_problem, caches_by_problem
-
-
-# ---------------------------------------------------------------------------
-# Statistics
-# ---------------------------------------------------------------------------
-def build_stats_report(
-    runs_by_problem: dict,
-    caches_by_problem: dict[str, CurveCache],
-    alpha: float = 0.05,
-) -> StatsReport:
-    """Friedman-gated, Holm-corrected pairwise Wilcoxon: ``itcas_ndig`` vs each baseline.
-
-    Reuses :func:`itcas.reporting.batch_vs_sequential._collect_product_auc_for_stats`
-    (generic over any method set) to get per-seed product-curve AUCs, then
-    :func:`itcas.reporting.stats.run_stats` with ``proposed_method=PROPOSED_METHOD``
-    -- pairwise tests are automatically restricted to proposed-vs-baseline
-    (never baseline-vs-baseline), Holm-Bonferroni corrected over the two
-    baselines, exactly matching the comparison asked for.
-    """
-    auc_by_problem = _collect_product_auc_for_stats(runs_by_problem, caches_by_problem)
-    # run_stats expects {problem: {axis: {difficulty: {method: [...]}}}};
-    # _collect_product_auc_for_stats already restricts to the evals axis (see
-    # its docstring) but doesn't nest an axis key, so add it here.
-    data = {problem: {_AXIS: diffs} for problem, diffs in auc_by_problem.items()}
-    return run_stats(data, proposed_method=PROPOSED_METHOD, alpha=alpha)
-
-
-def _report_to_markdown(report: StatsReport) -> str:
-    """Custom renderer: higher product-curve AUC is better (see module docstring)."""
-    lines: list[str] = []
-    lines.append("# ITCAS/NDIG (batch) vs itcas_seq/ndig vs cr_ndig")
-    lines.append("")
-    lines.append(
-        f"**Proposed:** `{report.proposed_method}` &nbsp;|&nbsp; "
-        f"**Baselines:** {', '.join(f'`{b}`' for b in BASELINE_METHODS)} "
-        f"&nbsp;|&nbsp; **α =** {report.alpha}"
-    )
-    lines.append("")
-    lines.append(
-        "Per (problem, difficulty): a **Friedman omnibus test** over all three methods "
-        "gates a **one-sided paired Wilcoxon signed-rank test** (`H1: itcas_ndig > baseline`) "
-        "against each baseline individually, Holm-Bonferroni corrected over the two baselines. "
-        "The per-seed scalar is the **area under the point-wise product curve** "
-        "(`summary._compute_seed_product_curve` integrated via `summary._curve_area`) on the "
-        "total-individual-evaluations axis -- higher is better (higher-is-better metrics "
-        "multiply directly into the product; FCFD, the one lower-is-better metric, "
-        "contributes as a reciprocal; see `contexts/metrics.md`)."
-    )
-    lines.append("")
-    lines.append(
-        "Significance markers: `***` p_adj < 0.001, `**` p_adj < 0.01, `*` p_adj < 0.05, `ns` not "
-        "significant. If the Friedman omnibus test does not reach significance, pairwise tests "
-        "are skipped for that group (noted below)."
-    )
-    lines.append("")
-    lines.append(
-        "| Problem | Difficulty | Seeds | Friedman p | Friedman sig | vs `itcas_seq_ndig` | "
-        "vs `cr_ndig` |"
-    )
-    lines.append(
-        "|:--------|:-----------|------:|-----------:|:------------:|:--------------------:|"
-        ":------------:|"
-    )
-    for g in sorted(report.groups, key=lambda x: (x.problem, x.difficulty)):
-        friedman_sig = "Yes" if g.friedman_significant else "No"
-        if g.note or not g.pairwise:
-            note = g.note or "no pairwise result"
-            lines.append(
-                f"| `{g.problem}` | `{g.difficulty}` | {g.n_seeds} | {_fmt(g.friedman_p)} "
-                f"| {friedman_sig} | _{note}_ | _{note}_ |"
-            )
-            continue
-        by_baseline = {pw.baseline: pw for pw in g.pairwise}
-        cells = []
-        for baseline in BASELINE_METHODS:
-            pw = by_baseline.get(baseline)
-            if pw is None:
-                cells.append("—")
-                continue
-            sig_str = _sig_marker(pw.significant, pw.p_adj)
-            cells.append(f"p_adj={_fmt(pw.p_adj)} {sig_str} (Δ={_fmt(pw.effect_median_diff)})")
-        lines.append(
-            f"| `{g.problem}` | `{g.difficulty}` | {g.n_seeds} | {_fmt(g.friedman_p)} "
-            f"| {friedman_sig} | {cells[0]} | {cells[1]} |"
-        )
-    lines.append("")
-
-    n_tested = sum(1 for g in report.groups if g.pairwise)
-    n_total = len(report.groups)
-
-    def _count_sig(baseline: str) -> int:
-        return sum(
-            1
-            for g in report.groups
-            for pw in g.pairwise
-            if pw.baseline == baseline and pw.significant
-        )
-
-    lines.append(
-        f"**Summary:** {n_tested} / {n_total} (problem, difficulty) groups had a significant "
-        f"Friedman omnibus test (α={report.alpha}). Among those, `itcas_ndig` significantly "
-        f"outperforms `itcas_seq_ndig` in **{_count_sig('itcas_seq_ndig')} / {n_tested}** and "
-        f"`cr_ndig` in **{_count_sig('cr_ndig')} / {n_tested}** groups."
-    )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def write_stats_report(report: StatsReport, out_dir: Path) -> tuple[Path, Path]:
-    """Write ``ndig_comparison_stats_report.{json,md}`` to ``out_dir``."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = out_dir / "ndig_comparison_stats_report.json"
-    md_path = out_dir / "ndig_comparison_stats_report.md"
-    json_path.write_text(report_to_json(report), encoding="utf-8")
-    md_path.write_text(_report_to_markdown(report), encoding="utf-8")
-    return json_path, md_path
-
-
-# ---------------------------------------------------------------------------
-# Top-level orchestration
-# ---------------------------------------------------------------------------
 def summarize_ndig_comparison(
     input_dir: str | Path,
     problems_config: str | Path = _DEFAULT_PROBLEMS_CONFIG,
     output_dir: str | Path | None = None,
-    alpha: float = 0.05,
+    auc_cache_dir: str | Path | None = None,
 ) -> list[str]:
-    problems = load_problems(problems_config)
+    """Write ``ndig_comparison_relative_auc_vs_synthetic_benchmarks.pdf`` under ``output_dir``.
+
+    ``auc_cache_dir`` defaults to ``Path(input_dir).parent / "auc_cache"``
+    when ``None`` -- same convention as
+    ``ff_comparison.py``/``casd_comparison.py``/``batch_improvement_comparison.py``.
+    """
+    input_path = Path(input_dir)
     out_dir = Path(output_dir) if output_dir is not None else Path(_DEFAULT_OUTPUT_DIR)
+    resolved_auc_cache_dir = (
+        Path(auc_cache_dir) if auc_cache_dir is not None else Path(input_dir).parent / "auc_cache"
+    )
 
-    paths, runs_by_problem, caches_by_problem = summarize_plots(input_dir, problems, out_dir)
+    problems = _synthetic_problems(problems_config)
 
-    report = build_stats_report(runs_by_problem, caches_by_problem, alpha=alpha)
-    json_p, md_p = write_stats_report(report, out_dir)
-    paths.extend([str(json_p), str(md_p)])
+    runs_by_problem = _collect_family_runs(input_path, problems, _ALL_NEEDED_METHODS)
+    caches_by_problem = {
+        p: _precompute_cached(runs, resolved_auc_cache_dir, p)
+        for p, runs in runs_by_problem.items() if runs
+    }
 
-    return paths
+    rows = []
+    for diff in DIFFICULTIES:
+        rows.extend(_rows_by_problem(problems, runs_by_problem, caches_by_problem, diff))
+    if not rows:
+        return []
+
+    metrics_present = _metrics_present_in_rows(rows)
+
+    # auc_cache intentionally omitted -- rows span multiple problems at once,
+    # see module docstring's "AUC caching" section.
+    relative_auc_lists = ranking.relative_auc_ratio_lists_over_rows(
+        rows, list(METHODS), _AXIS, pool_methods=list(POOL_METHODS),
+    )
+
+    out_path = out_dir / "ndig_comparison_relative_auc_vs_synthetic_benchmarks.pdf"
+    ok = _plot_relative_auc_box_grid_figure(
+        relative_auc_lists, list(PLOT_ORDER), _METHOD_STYLES, metrics_present,
+        out_path, method_labels=METHOD_ABBREVIATIONS,
+    )
+    return [str(ok)] if ok is not None else []
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -358,12 +202,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--input-dir", type=str, required=True)
     parser.add_argument(
         "--problems-config", type=str, default=_DEFAULT_PROBLEMS_CONFIG,
-        help="Path to the final-problems config listing the problem suite.",
+        help="Path to the final-problems config listing the synthetic problem suite.",
     )
     parser.add_argument("--output-dir", type=str, default=_DEFAULT_OUTPUT_DIR)
     parser.add_argument(
-        "--alpha", type=float, default=0.05,
-        help="Significance level for the Friedman gate and Holm-Bonferroni corrected Wilcoxon tests.",
+        "--auc-cache-dir", type=str, default=None, dest="auc_cache_dir",
+        help=(
+            "Directory for the disk-backed curve cache (see "
+            "itcas.reporting.auc_cache). Defaults to <input-dir's parent>/auc_cache."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -371,7 +218,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.input_dir,
         problems_config=args.problems_config,
         output_dir=args.output_dir,
-        alpha=args.alpha,
+        auc_cache_dir=args.auc_cache_dir,
     )
     for p in paths:
         print(p)

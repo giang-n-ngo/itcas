@@ -22,17 +22,35 @@ from typing import Any, Optional
 import torch
 
 
+# Logged floats are rounded to this many significant figures. The pipeline
+# computes everything in torch.double, so the untruncated repr carries ~17
+# digits of genuine (not float32-noise) precision -- but 6 sig figs (~1e-6
+# relative error) is already far tighter than anything that affects the
+# metrics computed downstream (fill distance, hypervolume, AUC, ...), and
+# cuts logged file size substantially.
+_SIG_FIGS = 6
+
+
+def _round_float(x: float) -> float:
+    if x == 0.0 or x != x or x in (float("inf"), float("-inf")):  # 0, NaN, +-inf
+        return x
+    return float(f"{x:.{_SIG_FIGS}g}")
+
+
 def _to_jsonable(x: Any) -> Any:
     if isinstance(x, torch.Tensor):
-        return x.detach().cpu().tolist()
+        x = x.detach().cpu().tolist()
+        return _to_jsonable(x)
     if isinstance(x, (list, tuple)):
         return [_to_jsonable(v) for v in x]
     if isinstance(x, dict):
         return {k: _to_jsonable(v) for k, v in x.items()}
-    if isinstance(x, (float, int, str, bool)) or x is None:
+    if isinstance(x, bool) or x is None or isinstance(x, (int, str)):
         return x
+    if isinstance(x, float):
+        return _round_float(x)
     try:
-        return float(x)
+        return _round_float(float(x))
     except Exception:
         return str(x)
 

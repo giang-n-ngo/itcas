@@ -340,7 +340,7 @@ def plot_problem_landscape(
             title = f"f{i + 1}: P(f{i + 1} >= tau={float(th[i]):.3g})"
             if row == 0:
                 title += f"\nvarying: x{dim_a} ({kind_a}), x{dim_b} ({kind_b})"
-            ax.set_title(title, fontsize=9)
+            ax.set_title(title, fontsize=13.5)
             ax.set_xlabel(f"x{dim_a}")
             ax.set_ylabel(f"x{dim_b}")
 
@@ -359,7 +359,7 @@ def plot_problem_landscape(
             f"Joint feasible (marginalized grid)\ntarget p={p:g} "
             f"({p * 100:.1f}%), displayed green={grid_achieved * 100:.2f}%\n"
             f"(raw unthresholded mean={raw_mean * 100:.2f}%)",
-            fontsize=9,
+            fontsize=13.5,
         )
         ax.set_xlabel(f"x{dim_a}")
         ax.set_ylabel(f"x{dim_b}")
@@ -382,7 +382,7 @@ def plot_problem_landscape(
         ax.set_title(
             f"Random-projection scatter (direct sample)\ntarget p={p:g} "
             f"({p * 100:.1f}%), scatter feasible={scatter_achieved * 100:.2f}%",
-            fontsize=9,
+            fontsize=13.5,
         )
         ax.set_xlabel("proj0")
         ax.set_ylabel("proj1")

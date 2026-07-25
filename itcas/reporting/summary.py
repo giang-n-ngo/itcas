@@ -146,8 +146,37 @@ def _short_metric_label(spec: MetricSpec) -> str:
     return short.get(spec.key, spec.label)
 
 
+def _feasible_pct_label(diff_key: str) -> str:
+    """Format a shared-standard-problem difficulty key as a percent tick label.
+
+    The shared ``p0_01``/``p0_05``/``p0_10``/``p0_20`` difficulty scale *is*
+    the joint-feasible-fraction threshold (``p0_01`` = 1% of the space is
+    feasible, etc.) -- this just renders that fraction as ``"N%"`` instead of
+    the raw key, in whichever of its two string forms a caller has on hand:
+    the bare ``threshold_pct`` value (``"0.01"``) or the directory/config-key
+    tag (``"p0_01"``). Only meaningful for that shared scale -- FF/CASD's own
+    per-problem difficulty levels are arbitrary numbered tiers, not feasible
+    fractions, and must never be passed through this function.
+    """
+    body = diff_key[1:] if diff_key.startswith("p") else diff_key
+    frac = float(body.replace("_", ".", 1))
+    return f"{frac * 100:g}%"
+
+
 # CurveCache maps run_name -> metric_key -> curve (list[float] | None)
 CurveCache = dict[str, dict[str, Optional[list[float]]]]
+
+# Sidecar key stashed inside a CurveCache entry alongside the real
+# `_ordered_metrics()` keys -- NOT itself a metric. It records the `eps`
+# value (`itcas.reporting.metrics.eps_archive_used`) that was actually used
+# to compute that run's `epsilon_archive_size` curve, so `_precompute_cached`
+# can tell a disk-cached entry apart from one computed under a since-changed
+# `configs/experiments.json` calibration (this is the *only* metric with an
+# external, orthogonal-to-run-data dependency -- see that function's
+# docstring). Every consumer that iterates a CurveCache entry's metrics does
+# so via `spec.key` lookups (never by iterating every key), so this extra
+# key is inert everywhere except `_is_complete`.
+_EPS_ARCHIVE_SIDECAR_KEY = "__eps_archive_used__"
 
 
 def _seed_area(
@@ -371,6 +400,86 @@ def _precompute(runs: list[RunSeries]) -> CurveCache:
     return cache
 
 
+def _precompute_cached(
+    runs: list[RunSeries],
+    cache_dir: str | Path | None,
+    problem: str,
+) -> CurveCache:
+    """Like :func:`_precompute`, but skips ``compute_metric`` for any run
+    already fully cached on disk under ``cache_dir``, and persists newly
+    computed curves back.
+
+    "Fully cached" means the on-disk entry for that ``run_name`` has every
+    key :func:`_ordered_metrics` currently defines *and* -- since
+    ``epsilon_archive_size`` is the one metric with an external dependency
+    (``configs/experiments.json``'s per-problem/difficulty ``eps_archive``
+    calibration, resolved by ``itcas.reporting.metrics.eps_archive_used``) --
+    was cached under the ``eps`` value still current for that run today. A
+    run cached by an older code version that computed fewer metrics, or
+    whose cached ``eps`` no longer matches the config (e.g. after a
+    recalibration), is treated as incomplete/stale and recomputed (from
+    scratch, for every metric -- there is no partial/per-metric top-up), so
+    neither a schema change nor a config recalibration can ever silently
+    serve stale/incomplete data. Every other metric has no such external
+    dependency (its curve is pure function of the run's own logged data), so
+    this check is deliberately scoped to just this one sidecar rather than a
+    general cache-versioning mechanism.
+
+    ``cache_dir=None`` reproduces :func:`_precompute` exactly (no caching,
+    no attempt to import :mod:`itcas.reporting.auc_cache`) -- every existing
+    call site that doesn't pass a ``cache_dir`` keeps working unchanged.
+    """
+    if cache_dir is None:
+        return _precompute(runs)
+
+    from .auc_cache import load_curve_cache_for_problem, save_curve_cache  # lazy, avoid the same import-cycle this module already dodges for auc_cache
+    from .metrics import eps_archive_used
+
+    existing = load_curve_cache_for_problem(cache_dir, problem)
+    metric_keys = {s.key for s in _ordered_metrics()}
+
+    def _is_complete(run: RunSeries) -> bool:
+        entry = existing.get(run.run_name)
+        if entry is None or not (metric_keys <= entry.keys()):
+            return False
+        # `.get(...)` (not `[...]`) so an entry cached before this sidecar
+        # existed (`None`) never equals a freshly-resolved eps and is
+        # correctly treated as stale -- see docstring.
+        return entry.get(_EPS_ARCHIVE_SIDECAR_KEY) == eps_archive_used(run)
+
+    # Computed once per run and reused below (both to build `to_compute` and
+    # in the main loop) so `eps_archive_used`'s config read isn't repeated.
+    complete = {r.run_name: _is_complete(r) for r in runs}
+    to_compute = [r for r in runs if not complete[r.run_name]]
+
+    # Same ref-building rule as _precompute (first run with thresholds),
+    # scoped to `to_compute` only -- on a full cache hit `to_compute` is
+    # empty, `ref` stays None, and `build_reference` (itself not free -- it
+    # constructs a 4000-point context reference set) is skipped entirely.
+    ref = None
+    for r in to_compute:
+        if r.thresholds.numel() > 0:
+            ref = build_reference(r)
+            break
+
+    cache: CurveCache = {}
+    newly_computed: CurveCache = {}
+    metrics = _ordered_metrics()
+    for run in runs:
+        if complete[run.run_name]:
+            cache[run.run_name] = existing[run.run_name]
+        else:
+            curves = {spec.key: compute_metric(run, spec, ref=ref) for spec in metrics}
+            curves[_EPS_ARCHIVE_SIDECAR_KEY] = eps_archive_used(run)
+            cache[run.run_name] = curves
+            newly_computed[run.run_name] = curves
+
+    if newly_computed:
+        save_curve_cache(cache_dir, problem, runs, newly_computed)
+
+    return cache
+
+
 def _collect(
     runs: list[RunSeries],
     axis: str,
@@ -494,7 +603,7 @@ def _plot_problem(
                     data.append(vals)
                     positions.append(method_to_y[m])
                     labels.append(m)
-            ax.tick_params(axis="x", labelsize=7)
+            ax.tick_params(axis="x", labelsize=10.5)
             ax.grid(True, axis="x", alpha=0.25)
             if data:
                 ax.boxplot(
@@ -514,19 +623,19 @@ def _plot_problem(
             else:
                 ax.text(
                     0.5, 0.5, "(no data)", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8, color="grey",
+                    transform=ax.transAxes, fontsize=12, color="grey",
                 )
             # Re-apply ticks/labels AFTER boxplot (which overrides them).
             ax.set_yticks(list(method_to_y.values()))
-            ax.set_yticklabels(methods, fontsize=7)
+            ax.set_yticklabels(methods, fontsize=10.5)
             ax.set_ylim(0.5, len(methods) + 0.5)
             ax.invert_yaxis()
             if r_idx == 0:
-                ax.set_title(_short_metric_label(spec), fontsize=8)
+                ax.set_title(_short_metric_label(spec), fontsize=12)
             if r_idx == n_rows - 1:
-                ax.set_xlabel("area", fontsize=8)
+                ax.set_xlabel("area", fontsize=12)
             if c_idx == 0:
-                ax.set_ylabel(f"{diff}\nmethod", fontsize=8)
+                ax.set_ylabel(f"{diff}\nmethod", fontsize=12)
             else:
                 # Free up horizontal space — y ticks repeat the method names.
                 ax.tick_params(labelleft=False)
@@ -540,7 +649,7 @@ def _plot_problem(
                 data.append(vals)
                 positions.append(method_to_y[m])
                 labels.append(m)
-        ax.tick_params(axis="x", labelsize=7)
+        ax.tick_params(axis="x", labelsize=10.5)
         ax.grid(True, axis="x", alpha=0.25)
         if data:
             ax.boxplot(
@@ -559,16 +668,16 @@ def _plot_problem(
         else:
             ax.text(
                 0.5, 0.5, "(no data)", ha="center", va="center",
-                transform=ax.transAxes, fontsize=8, color="grey",
+                transform=ax.transAxes, fontsize=12, color="grey",
             )
         ax.set_yticks(list(method_to_y.values()))
-        ax.set_yticklabels(methods, fontsize=7)
+        ax.set_yticklabels(methods, fontsize=10.5)
         ax.set_ylim(0.5, len(methods) + 0.5)
         ax.invert_yaxis()
         if r_idx == 0:
-            ax.set_title("Hypervolume\n(product of metric areas, higher is better)", fontsize=8)
+            ax.set_title("Hypervolume\n(product of metric areas, higher is better)", fontsize=12)
         if r_idx == n_rows - 1:
-            ax.set_xlabel("product of areas", fontsize=8)
+            ax.set_xlabel("product of areas", fontsize=12)
         ax.tick_params(labelleft=False)
 
     fig.tight_layout()
@@ -654,7 +763,7 @@ def _plot_problem_curves(
         for c_idx, spec in enumerate(metrics_present):
             ax = axes[r_idx][c_idx]
             ax.grid(True, alpha=0.25)
-            ax.tick_params(axis="both", labelsize=7)
+            ax.tick_params(axis="both", labelsize=10.5)
             plotted = False
 
             for method in methods:
@@ -683,13 +792,13 @@ def _plot_problem_curves(
 
             if not plotted:
                 ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=8, color="grey")
+                        transform=ax.transAxes, fontsize=12, color="grey")
             if r_idx == 0:
-                ax.set_title(_SHORT_CURVE_LABELS.get(spec.key, spec.label), fontsize=8)
+                ax.set_title(_SHORT_CURVE_LABELS.get(spec.key, spec.label), fontsize=12)
             if r_idx == n_rows - 1:
-                ax.set_xlabel(axis_label, fontsize=8)
+                ax.set_xlabel(axis_label, fontsize=12)
             if c_idx == 0:
-                ax.set_ylabel(f"{diff}", fontsize=8)
+                ax.set_ylabel(f"{diff}", fontsize=12)
 
         # Pre-compute each method's own product curve (own x-values -- see
         # _per_method_product_curves; no cross-method truncation/alignment).
@@ -702,7 +811,7 @@ def _plot_problem_curves(
         # no cross-method alignment since it's N independent lines.
         ax = axes[r_idx][-2]
         ax.grid(True, alpha=0.25)
-        ax.tick_params(axis="both", labelsize=7)
+        ax.tick_params(axis="both", labelsize=10.5)
         plotted = False
         for method in sorted(method_med.keys()):
             color = method_colors[method]
@@ -715,18 +824,18 @@ def _plot_problem_curves(
             plotted = True
         if not plotted:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8, color="grey")
+                    transform=ax.transAxes, fontsize=12, color="grey")
         if r_idx == 0:
-            ax.set_title("Product\n(raw, higher is better)", fontsize=8)
+            ax.set_title("Product\n(raw, higher is better)", fontsize=12)
         if r_idx == n_rows - 1:
-            ax.set_xlabel(axis_label, fontsize=8)
+            ax.set_xlabel(axis_label, fontsize=12)
 
         # Rank column (col N+2) — rank of the median product at each step
         # (1 = best), aligned across methods on the union-of-x-values grid
         # via forward-fill (see _rank_curves_on_union_grid).
         ax = axes[r_idx][-1]
         ax.grid(True, axis="y", alpha=0.25)
-        ax.tick_params(axis="both", labelsize=7)
+        ax.tick_params(axis="both", labelsize=10.5)
         plotted = False
         if method_med:
             grid, rank_curves = _rank_curves_on_union_grid(method_x, method_med)
@@ -739,11 +848,11 @@ def _plot_problem_curves(
             ax.set_yticks(list(range(1, n_ranked + 1)))
         if not plotted:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8, color="grey")
+                    transform=ax.transAxes, fontsize=12, color="grey")
         if r_idx == 0:
-            ax.set_title("Product rank\n(1 = best)", fontsize=8)
+            ax.set_title("Product rank\n(1 = best)", fontsize=12)
         if r_idx == n_rows - 1:
-            ax.set_xlabel(axis_label, fontsize=8)
+            ax.set_xlabel(axis_label, fontsize=12)
 
     # Shared legend drawn once below all subplots
     handles_seen: dict[str, object] = {}
@@ -755,7 +864,7 @@ def _plot_problem_curves(
         fig.legend(
             list(handles_seen.values()), list(handles_seen.keys()),
             loc="lower center", ncol=min(len(methods), 6),
-            fontsize=8, bbox_to_anchor=(0.5, 0.0),
+            fontsize=12, bbox_to_anchor=(0.5, 0.0),
         )
         fig.tight_layout(rect=(0, 0.06, 1, 1))
     else:
@@ -816,7 +925,7 @@ def _plot_hypervolume_from_data(
                 if vals:
                     data.append(vals)
                     positions.append(method_to_y[m])
-            ax.tick_params(axis="x", labelsize=7)
+            ax.tick_params(axis="x", labelsize=10.5)
             ax.grid(True, axis="x", alpha=0.25)
             if data:
                 ax.boxplot(
@@ -835,18 +944,18 @@ def _plot_hypervolume_from_data(
             else:
                 ax.text(
                     0.5, 0.5, "(no data)", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8, color="grey",
+                    transform=ax.transAxes, fontsize=12, color="grey",
                 )
             ax.set_yticks(list(method_to_y.values()))
-            ax.set_yticklabels(all_methods, fontsize=7)
+            ax.set_yticklabels(all_methods, fontsize=10.5)
             ax.set_ylim(0.5, len(all_methods) + 0.5)
             ax.invert_yaxis()
             if r_idx == 0:
-                ax.set_title(problem, fontsize=9)
+                ax.set_title(problem, fontsize=13.5)
             if r_idx == n_rows - 1:
-                ax.set_xlabel("product of areas", fontsize=8)
+                ax.set_xlabel("product of areas", fontsize=12)
             if c_idx == 0:
-                ax.set_ylabel(f"{diff}\nmethod", fontsize=8)
+                ax.set_ylabel(f"{diff}\nmethod", fontsize=12)
             else:
                 ax.tick_params(labelleft=False)
 
@@ -1129,10 +1238,10 @@ def _draw_metric_bar_panel(
     ratio). ``reference_line``, if given, draws a dashed vertical guide (e.g.
     the "1.0 = best" mark for the relative-AUC figure).
     """
-    ax.tick_params(axis="both", labelsize=7)
+    ax.tick_params(axis="both", labelsize=10.5)
     if not data:
         ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                transform=ax.transAxes, fontsize=8, color="grey")
+                transform=ax.transAxes, fontsize=12, color="grey")
         return
     present = [m for m in methods if m in data]
     present_sorted = sorted(present, key=lambda m: data[m], reverse=not ascending_is_better)
@@ -1147,7 +1256,87 @@ def _draw_metric_bar_panel(
         ax.axvline(reference_line, color="black", linestyle="--", linewidth=0.8, alpha=0.6)
     ax.grid(True, axis="x", alpha=0.25)
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(labels, fontsize=7)
+    ax.set_yticklabels(labels, fontsize=10.5)
+    ax.invert_yaxis()
+
+
+def _draw_metric_box_panel(
+    ax,
+    data: Optional[dict[str, list[float]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    method_labels: Optional[dict[str, str]],
+    *,
+    ascending_is_better: bool,
+    reference_line: Optional[float] = None,
+    sort_by_mean: bool = True,
+    show_labels: bool = True,
+) -> None:
+    """Horizontal boxplot of one column's per-method distribution (rank/ratio spread across rows).
+
+    Boxplot sibling of :func:`_draw_metric_bar_panel`: instead of a single
+    bar for one already-averaged scalar per method, draws one box per method
+    summarizing the spread of that method's own per-row values (e.g. from
+    ``ranking.rank_lists_over_rows`` / ``ranking.relative_auc_ratio_lists_over_rows``)
+    -- the distribution the bar chart's mean was hiding. By default
+    (``sort_by_mean=True``) methods are sorted by their own mean value,
+    exactly like the bar panel's sort (``ascending_is_better=True`` sorts
+    smallest-mean-first, e.g. rank; ``False`` sorts largest-mean-first, e.g. a
+    higher-is-better relative-AUC ratio); ``sort_by_mean=False`` instead keeps
+    ``methods``' own given order top-to-bottom (a caller that wants a fixed,
+    data-independent row order across every panel, e.g.
+    :func:`_plot_relative_auc_box_grid_figure`, which always shows NDIG above
+    NDIG-B regardless of which one scores higher in a given panel). By
+    default (``show_labels=True``) each box gets a y-tick text label from
+    ``method_labels``; ``show_labels=False`` omits both the tick marks and
+    their text (e.g. when a caller draws one shared legend for the whole
+    figure instead of repeating per-panel method-name labels).
+    ``reference_line``, if given, draws the same dashed vertical guide as the
+    bar panel. A method with a single-sample list still renders (a
+    degenerate, zero-width box); a method with no data (missing or empty
+    list) is simply omitted, mirroring the bar panel's ``present`` filter.
+    """
+    from matplotlib.colors import to_rgba  # lazy import, mirrors other plot helpers in this module
+
+    ax.tick_params(axis="both", labelsize=10.5)
+    present = [m for m in methods if data and data.get(m)]
+    if not present:
+        ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
+                transform=ax.transAxes, fontsize=12, color="grey")
+        return
+    if sort_by_mean:
+        present_sorted = sorted(
+            present, key=lambda m: sum(data[m]) / len(data[m]), reverse=not ascending_is_better
+        )
+    else:
+        present_sorted = present
+    y_pos = list(range(len(present_sorted)))
+    values = [data[m] for m in present_sorted]
+    labels = [
+        (method_labels.get(m, m) if method_labels else m) for m in present_sorted
+    ]
+    bp = ax.boxplot(
+        values, positions=y_pos, vert=False, patch_artist=True, showfliers=False, widths=0.6,
+    )
+    for m, box, whisker_lo, whisker_hi, cap_lo, cap_hi, median in zip(
+        present_sorted, bp["boxes"],
+        bp["whiskers"][0::2], bp["whiskers"][1::2],
+        bp["caps"][0::2], bp["caps"][1::2],
+        bp["medians"],
+    ):
+        color = method_styles[m]["color"]
+        box.set_facecolor(to_rgba(color, alpha=0.6))
+        box.set_edgecolor(color)
+        for artist in (whisker_lo, whisker_hi, cap_lo, cap_hi, median):
+            artist.set_color(color)
+    if reference_line is not None:
+        ax.axvline(reference_line, color="black", linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.grid(True, axis="x", alpha=0.25)
+    if show_labels:
+        ax.set_yticks(y_pos)
+        ax.set_yticklabels(labels, fontsize=10.5)
+    else:
+        ax.set_yticks([])
     ax.invert_yaxis()
 
 
@@ -1188,15 +1377,71 @@ def _plot_avg_rank_figure(
             ax, avg_rank_row.get(spec.key), methods, method_styles, method_labels,
             ascending_is_better=True,
         )
-        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)}", fontsize=8)
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)}", fontsize=12)
         if c_idx == 0:
-            ax.set_ylabel(f"Avg rank across {n_rows} problems\n(best to worst)", fontsize=8)
+            ax.set_ylabel(f"Avg rank across {n_rows} problems\n(best to worst)", fontsize=12)
 
     _draw_metric_bar_panel(
         axes[-1], avg_rank_row.get("product"), methods, method_styles, method_labels,
         ascending_is_better=True,
     )
-    axes[-1].set_title("Product\n(raw)", fontsize=8)
+    axes[-1].set_title("Product\n(raw)", fontsize=12)
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _plot_avg_rank_box_figure(
+    avg_rank_lists: dict[str, dict[str, list[float]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    n_rows: int,
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+) -> Optional[Path]:
+    """Standalone boxplot figure: rank distribution per metric (+ product), 1 = best.
+
+    Exact structural sibling of :func:`_plot_avg_rank_figure` -- same figsize
+    formula, same per-column titles, same y-label wording -- but draws each
+    method's full per-row rank distribution (via :func:`_draw_metric_box_panel`)
+    instead of collapsing it to a single averaged bar, so the spread across
+    rows (``ranking.rank_lists_over_rows``) stays visible. ``ascending_is_better=True``
+    throughout, exactly like the bar-chart version (rank 1 = best).
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    if not metrics_present:
+        return None
+
+    n_cols = len(metrics_present) + 1  # + product
+    fig_w = max(3.0 * n_cols, 10.0)
+    fig_h = max(0.4 * len(methods) + 1.5, 3.0)
+    fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    axes = axes[0]
+
+    for c_idx, spec in enumerate(metrics_present):
+        ax = axes[c_idx]
+        _draw_metric_box_panel(
+            ax, avg_rank_lists.get(spec.key), methods, method_styles, method_labels,
+            ascending_is_better=True,
+        )
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)}", fontsize=12)
+        if c_idx == 0:
+            ax.set_ylabel(f"Avg rank across {n_rows} problems\n(best to worst)", fontsize=12)
+
+    _draw_metric_box_panel(
+        axes[-1], avg_rank_lists.get("product"), methods, method_styles, method_labels,
+        ascending_is_better=True,
+    )
+    axes[-1].set_title("Product\n(raw)", fontsize=12)
 
     fig.tight_layout()
     out_path = Path(out_path)
@@ -1249,17 +1494,178 @@ def _plot_relative_auc_figure(
             ascending_is_better=not spec.higher_is_better, reference_line=1.0,
         )
         arrow = "↑" if spec.higher_is_better else "↓"
-        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=8)
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=12)
         if c_idx == 0:
             ax.set_ylabel(
-                f"Avg relative AUC across {n_rows} problems\n(1.0 = best)", fontsize=8
+                f"Avg relative AUC across {n_rows} problems\n(1.0 = best)", fontsize=12
             )
 
     _draw_metric_bar_panel(
         axes[-1], relative_auc_row.get("product"), methods, method_styles, method_labels,
         ascending_is_better=False, reference_line=1.0,
     )
-    axes[-1].set_title("Product ↑\n(raw)", fontsize=8)
+    axes[-1].set_title("Product ↑\n(raw)", fontsize=12)
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _plot_relative_auc_box_figure(
+    relative_auc_lists: dict[str, dict[str, list[float]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    n_rows: int,
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+    x_axis_label: Optional[str] = None,
+) -> Optional[Path]:
+    """Standalone boxplot figure: relative-AUC ratio distribution per metric (+ product).
+
+    Exact structural sibling of :func:`_plot_relative_auc_figure` -- same
+    figsize formula, same per-column titles/direction arrows, same
+    ``ascending_is_better``/``reference_line=1.0`` conventions -- but draws
+    each method's full per-row ratio distribution (via
+    :func:`_draw_metric_box_panel`, fed by
+    ``ranking.relative_auc_ratio_lists_over_rows``) instead of collapsing it
+    to a single averaged bar, so the spread across rows stays visible. See
+    :func:`itcas.reporting.ranking.relative_auc_ratios_over_rows` for the
+    exact definition of "ratio".
+
+    ``x_axis_label``, when given, replaces the default ``ylabel``-positioned
+    ``"Avg relative AUC across N problems (1.0 = best)"`` text with a plain,
+    centered ``fig.supxlabel`` call using the given text verbatim (this is a
+    *horizontal* box plot -- the ratio values are the x-axis, method names
+    the y-tick labels -- so a caller that wants a short, literal x-axis title
+    instead of the default verbose left-edge label can opt in per call site;
+    omit it to keep every other caller's existing output byte-identical).
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    if not metrics_present:
+        return None
+
+    n_cols = len(metrics_present) + 1  # + product
+    fig_w = max(3.0 * n_cols, 10.0)
+    fig_h = max(0.4 * len(methods) + 1.5, 3.0)
+    fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    axes = axes[0]
+
+    for c_idx, spec in enumerate(metrics_present):
+        ax = axes[c_idx]
+        _draw_metric_box_panel(
+            ax, relative_auc_lists.get(spec.key), methods, method_styles, method_labels,
+            ascending_is_better=not spec.higher_is_better, reference_line=1.0,
+        )
+        arrow = "↑" if spec.higher_is_better else "↓"
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=12)
+        if c_idx == 0 and x_axis_label is None:
+            ax.set_ylabel(
+                f"Avg relative AUC across {n_rows} problems\n(1.0 = best)", fontsize=12
+            )
+
+    _draw_metric_box_panel(
+        axes[-1], relative_auc_lists.get("product"), methods, method_styles, method_labels,
+        ascending_is_better=False, reference_line=1.0,
+    )
+    axes[-1].set_title("Product ↑\n(raw)", fontsize=12)
+
+    if x_axis_label is not None:
+        fig.supxlabel(x_axis_label, fontsize=12)
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _plot_relative_auc_box_grid_figure(
+    relative_auc_lists: dict[str, dict[str, list[float]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+) -> Optional[Path]:
+    """Standalone 2x2-grid boxplot figure: relative-AUC ratio distribution, one panel per metric.
+
+    A 2x2-grid sibling of :func:`_plot_relative_auc_box_figure`: same
+    per-panel content (:func:`_draw_metric_box_panel`, same
+    ``ascending_is_better``/``reference_line=1.0`` conventions, same
+    ``ranking.relative_auc_ratio_lists_over_rows`` input shape and "ratio"
+    definition), but laid out as a 2x2 grid of the (exactly four)
+    :class:`MetricSpec`\\ s in ``metrics_present`` instead of one wide row --
+    and, unlike that figure, never draws a **product** panel (there is no
+    fifth panel to place in a 2x2 grid, and the product column has no
+    ``MetricSpec``/direction of its own to plot alongside four fixed metric
+    panels here).
+
+    Panels are filled row-major (``metrics_present[0]`` top-left,
+    ``metrics_present[1]`` top-right, ``metrics_present[2]`` bottom-left,
+    ``metrics_present[3]`` bottom-right); any panel beyond the fourth is
+    silently dropped and any short of four leaves the remaining grid cell(s)
+    blank (axis turned off) rather than crashing, so this still degrades
+    gracefully if a metric is ever absent from the data.
+
+    Unlike :func:`_plot_relative_auc_box_figure`, each panel's boxes are
+    drawn in ``methods``' own given order (top-to-bottom, not sorted by
+    mean -- ``sort_by_mean=False``) and carry no per-panel y-tick labels
+    (``show_labels=False``): the same two methods repeat in every one of the
+    four panels, so their names are shown once, via a single shared legend
+    below the grid, instead of four times.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
+    from matplotlib.patches import Patch
+
+    if not metrics_present:
+        return None
+
+    panels = metrics_present[:4]
+    fig, axes = plt.subplots(2, 2, figsize=(11.0, 8.0), squeeze=False)
+    flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
+
+    for ax, spec in zip(flat_axes, panels):
+        _draw_metric_box_panel(
+            ax, relative_auc_lists.get(spec.key), methods, method_styles, method_labels,
+            ascending_is_better=not spec.higher_is_better, reference_line=1.0,
+            sort_by_mean=False, show_labels=False,
+        )
+        arrow = "↑" if spec.higher_is_better else "↓"
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=12)
+
+    for ax in flat_axes[len(panels):]:
+        ax.axis("off")
+
+    legend_handles = [
+        Patch(
+            facecolor=to_rgba(method_styles[m]["color"], alpha=0.6),
+            edgecolor=method_styles[m]["color"],
+            label=(method_labels.get(m, m) if method_labels else m),
+        )
+        for m in methods
+    ]
+    fig.legend(
+        handles=legend_handles, loc="lower center", ncol=len(methods),
+        fontsize=12, bbox_to_anchor=(0.5, -0.05),
+    )
+    fig.text(
+        0.5, -0.13,
+        "Avg relative AUC across synthetic problems and difficulty (1.0 = best)",
+        fontsize=12, ha="center",
+    )
 
     fig.tight_layout()
     out_path = Path(out_path)
@@ -1271,7 +1677,7 @@ def _plot_relative_auc_figure(
 
 def _draw_metric_line_panel(
     ax,
-    relative_auc_by_level: list[tuple[str, dict[str, dict[str, float]]]],
+    relative_auc_by_level: list[tuple[str, dict[str, dict[str, list[float]]]]],
     column_key: str,
     methods: list[str],
     method_styles: dict[str, dict],
@@ -1279,29 +1685,47 @@ def _draw_metric_line_panel(
     *,
     higher_is_better: bool,
 ) -> None:
-    """One panel of :func:`_plot_relative_auc_by_difficulty_figure`: one line per method.
+    """One panel of :func:`_plot_relative_auc_by_difficulty_figure`: one line + IQR band per method.
 
     ``relative_auc_by_level`` is ``[(level_label, relative_auc_row), ...]``
-    already in x-axis order (see that function's docstring). Plots evenly
-    spaced categorical x positions (``range(n)``, never the real difficulty
-    value) against each method's relative-AUC ratio for ``column_key`` at
-    that level, using ``float("nan")`` for a (method, level) combination with
-    no data so the line breaks there instead of raising or silently skipping
-    the method. Draws a dashed ``y=1.0`` reference line (mirrors
+    already in x-axis order (see that function's docstring), where each
+    ``relative_auc_row`` is ``{column_key: {method: [ratio, ...]}}`` -- a
+    *list* of per-seed (or per-row, depending on the caller) ratios per
+    (column, method) at that level, not a single averaged scalar. Plots
+    evenly spaced categorical x positions (``range(n)``, never the real
+    difficulty value); at each level, a method's line point is the **mean**
+    of its ratio list for ``column_key``, and a shaded band around the line
+    shows the 25th-75th percentile (interquartile) spread of that same list
+    (via ``numpy.percentile``), so a level with a single sample degenerates
+    to a zero-width band instead of crashing. A ``float("nan")`` point (and
+    correspondingly no band) is used for a (method, level) combination with
+    no data at all, so the line breaks there instead of raising or silently
+    skipping the method. Draws a dashed ``y=1.0`` reference line (mirrors
     ``_draw_metric_bar_panel``'s ``reference_line=1.0``); ``higher_is_better``
     is accepted for signature symmetry with the bar-panel helper but doesn't
     otherwise affect this panel's rendering (a line plot has no "sort
     direction" the way a bar chart does).
     """
-    ax.tick_params(axis="both", labelsize=7)
+    import numpy as np  # lazy import; numpy is already a hard dependency via matplotlib
+
+    ax.tick_params(axis="both", labelsize=10.5)
     n = len(relative_auc_by_level)
     x = list(range(n))
     any_data = False
     for method in methods:
-        ys = []
+        ys: list[float] = []
+        los: list[float] = []
+        his: list[float] = []
         for _level_label, row in relative_auc_by_level:
-            val = (row.get(column_key) or {}).get(method)
-            ys.append(float(val) if val is not None else float("nan"))
+            values = (row.get(column_key) or {}).get(method) or []
+            if values:
+                ys.append(float(sum(values) / len(values)))
+                los.append(float(np.percentile(values, 25)))
+                his.append(float(np.percentile(values, 75)))
+            else:
+                ys.append(float("nan"))
+                los.append(float("nan"))
+                his.append(float("nan"))
         if all(v != v for v in ys):  # all NaN -- no data anywhere for this method
             continue
         any_data = True
@@ -1312,25 +1736,32 @@ def _draw_metric_line_panel(
             color=style.get("color"), linestyle=style.get("linestyle", "-"),
             marker="o", markersize=3, linewidth=1.2, label=label,
         )
+        los_arr = np.array(los, dtype=float)
+        his_arr = np.array(his, dtype=float)
+        if not np.all(np.isnan(los_arr)):  # skip fill_between for an all-NaN band
+            ax.fill_between(
+                x, los_arr, his_arr, color=style.get("color"), alpha=0.15, linewidth=0,
+            )
     if not any_data:
         ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                transform=ax.transAxes, fontsize=8, color="grey")
+                transform=ax.transAxes, fontsize=12, color="grey")
         return
     ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8, alpha=0.6)
     ax.grid(True, axis="y", alpha=0.25)
     ax.set_xticks(x)
-    ax.set_xticklabels([lvl for lvl, _ in relative_auc_by_level], fontsize=7)
+    ax.set_xticklabels([lvl for lvl, _ in relative_auc_by_level], fontsize=10.5)
 
 
 def _plot_relative_auc_by_difficulty_figure(
-    relative_auc_by_level: list[tuple[str, dict[str, dict[str, float]]]],
+    relative_auc_by_level: list[tuple[str, dict[str, dict[str, list[float]]]]],
     methods: list[str],
     method_styles: dict[str, dict],
     metrics_present: list[MetricSpec],
     out_path: str | Path,
     method_labels: Optional[dict[str, str]] = None,
+    x_axis_label: Optional[str] = None,
 ) -> Optional[Path]:
-    """Standalone line-plot figure: relative-AUC ratio per metric (+ product), across difficulty.
+    """Standalone line-plot figure: relative-AUC ratio (+ IQR band) per metric, across difficulty.
 
     A sibling of :func:`_plot_relative_auc_figure` that shows the same
     per-(row, method, column) relative-AUC ratios (see
@@ -1339,18 +1770,33 @@ def _plot_relative_auc_by_difficulty_figure(
     collapses every row (difficulty level) into one number per method per
     column, whereas this figure draws one line per method per column, plotted
     across difficulty levels on the x-axis, so a method's trend as the
-    problem gets harder/easier stays visible.
+    problem gets harder/easier stays visible. ``x_axis_label``, when given,
+    is drawn once, centered under the whole figure (via ``fig.text`` at a
+    y-position below the shared bottom legend, rather than ``fig.supxlabel``,
+    which would sit close enough to overlap it); omit it (the default) to
+    reproduce the previous behavior of no axis title, just bare level tick
+    labels -- appropriate for FF/CASD, whose difficulty levels are arbitrary
+    numbered tiers, not a labelable quantity like a feasible-set proportion.
+    Unlike the bar/box figures, the
+    variation shown here is *not* collapsed away either: each line is
+    surrounded by a shaded interquartile band (see :func:`_draw_metric_line_panel`)
+    built directly from the same per-level ratio list, so a level's spread
+    stays visible right alongside its trend.
 
     ``relative_auc_by_level`` is ``[(level_label, relative_auc_row), ...]``,
     already in the desired x-axis order, where each ``relative_auc_row`` is
-    one call to ``ranking.relative_auc_ratios_over_rows`` restricted to just
-    that level's own row(s) (i.e. *not* averaged across levels -- callers are
-    responsible for computing each level's ratios independently; see
-    ``ff_comparison``/``casd_comparison``'s single-row calls, or the
-    synthetic pipeline's already-per-difficulty ``_combine_synthetic_summaries``
-    output). ``level_label`` is used verbatim as that level's x-tick label
-    and should already be short (unlike the verbose multi-line row labels
-    used elsewhere in this package).
+    ``{column_key: {method: [ratio, ...]}}`` -- a *list* of ratios per
+    (column, method) at that level (i.e. *not* averaged across levels, and
+    not reduced to one scalar within a level either -- callers are
+    responsible for computing each level's own ratio list independently; see
+    ``ff_comparison``'s per-level ``ranking.relative_auc_seed_ratios_for_row``
+    calls, whose list is each level's own per-seed spread, or
+    ``casd_comparison``'s equivalent, or the synthetic pipeline's
+    already-per-difficulty ``_combine_synthetic_summaries`` output, whose list
+    is that difficulty's spread across *problems* rather than seeds -- see
+    that pipeline's own docstring for why). ``level_label`` is used verbatim
+    as that level's x-tick label and should already be short (unlike the
+    verbose multi-line row labels used elsewhere in this package).
 
     Same panel layout as :func:`_plot_relative_auc_figure` (one column per
     metric in ``metrics_present`` plus a trailing Product column, each titled
@@ -1381,23 +1827,675 @@ def _plot_relative_auc_by_difficulty_figure(
             higher_is_better=spec.higher_is_better,
         )
         arrow = "↑" if spec.higher_is_better else "↓"
-        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=8)
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=12)
         if c_idx == 0:
-            ax.set_ylabel("Relative AUC by difficulty\n(1.0 = best)", fontsize=8)
+            ax.set_ylabel("Relative AUC by difficulty\n(1.0 = best)", fontsize=12)
 
     _draw_metric_line_panel(
         axes[-1], relative_auc_by_level, "product", methods, method_styles, method_labels,
         higher_is_better=True,
     )
-    axes[-1].set_title("Product ↑\n(raw)", fontsize=8)
+    axes[-1].set_title("Product ↑\n(raw)", fontsize=12)
 
     handles, labels = axes[0].get_legend_handles_labels()
     if handles:
         fig.legend(
             handles, labels, loc="lower center", ncol=min(len(labels), 6),
-            fontsize=7, bbox_to_anchor=(0.5, -0.05),
+            fontsize=10.5, bbox_to_anchor=(0.5, -0.05),
         )
 
+    if x_axis_label is not None:
+        fig.text(0.5, -0.16, x_axis_label, fontsize=12, ha="center")
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Normalized average curve vs % of evaluation budget: one extra cross-row
+# figure shared by every "grid of rows" comparison family (synthetic,
+# ff_comparison, casd_comparison).
+#
+# Every other cross-row figure in this file (avg-rank box, relative-AUC box,
+# relative-AUC-by-difficulty line+band) collapses each row down to *one
+# scalar per (row, method, column)* -- an AUC, a rank, a ratio -- before ever
+# averaging across rows. This figure instead keeps each row's full
+# **iteration-by-iteration curve** and averages those curves across rows
+# directly, so a reader can see not just "who wins on average" but *where in
+# the search* (early/late) a method's advantage shows up. Two problems that
+# scalar-AUC figures don't have to solve become unavoidable here:
+#
+# 1. **X-axis alignment.** A synthetic problem's own budget (``run.config
+#    ["budget"]``) can be 100 or 200 depending on the problem, so plotting
+#    raw ``x_evals`` and averaging positionally/by-value across rows would
+#    silently blend a problem 40% through its search with another only 20%
+#    through its own. FF/CASD share one fixed budget across every difficulty
+#    row, so they have no such mismatch to begin with -- but reusing the same
+#    "% of this run's own budget" x-axis (:func:`_run_budget`) for all three
+#    families means one implementation serves everyone: for FF/CASD it's
+#    simply a linear rescale of evals (harmless, budget is constant there),
+#    and for synthetic it's the fix that makes cross-problem averaging valid.
+#    ``run.config["budget"]`` itself only counts *acquisition* evaluations,
+#    not the shared init dataset (``x_evals`` ranges ``[n_init,
+#    n_init+budget]``, not ``[0, budget]`` -- see :func:`_run_budget`'s
+#    docstring) -- :func:`_row_normalized_method_curves` subtracts each run's
+#    own ``x_evals[0]`` before dividing by budget, so 0% always means "right
+#    after the shared init dataset," the same point in the search for every
+#    method/metric/row, instead of a row-varying offset that made curves
+#    appear to start at different points for no real reason.
+# 2. **Y-axis normalization.** A metric's raw scale (e.g. FCHV) can differ by
+#    orders of magnitude between rows (problems/difficulty levels), so a
+#    straight average of raw curves across rows would be dominated by
+#    whichever row happens to have the largest numbers. This reuses the
+#    ratio-to-row-best convention :mod:`itcas.reporting.ranking` already
+#    established for AUCs (:func:`itcas.reporting.ranking.relative_auc_seed_ratios_for_row`):
+#    within one row, divide every curve by that row's single most extreme
+#    value seen anywhere (any method, any seed, any timestep) -- 1.0 means
+#    "matched the best-ever value seen anywhere in this row." Exactly as in
+#    that convention, this is *not* renormalized to "higher=better" for
+#    lower-is-better metrics (FCFD): a ratio below 1.0 is worse there, not
+#    better, matching every other relative-ratio figure in this file.
+#
+# Reading a run's curve off the shared ``pct_grid`` (see
+# ``_row_normalized_method_curves`` below) uses linear interpolation between
+# a run's own logged checkpoints (``numpy.interp``), NOT the piecewise-constant
+# forward-fill ``_forward_fill_at`` uses for ``_rank_curves_on_union_grid``'s
+# batch-vs-sequential rank alignment. The proposed method (``itcas_ndig``) is
+# the only *batch* method in every family this figure covers, so it logs far
+# fewer, more widely-spaced checkpoints than the sequential baselines;
+# forward-filling those sparse checkpoints onto this figure's much finer
+# 41-point grid turned them into a visible staircase that isn't present in
+# any raw per-problem plot in this file (those just draw one straight
+# ``matplotlib`` line segment between a method's own real checkpoints, i.e.
+# implicit linear interpolation) -- switching to explicit linear
+# interpolation here matches that existing visual convention instead of
+# introducing a new artifact of the resampling step itself. Only the
+# *interior* behavior changes: still NaN before a run's first checkpoint (no
+# data yet to interpolate from) and still held flat at the last known value
+# past a run's last checkpoint (both conventions agree there's nothing newer
+# to show once a run ends).
+# ---------------------------------------------------------------------------
+def _default_pct_grid(n_grid_points: int = 41) -> list[float]:
+    """Evenly spaced ``0..100`` percent-of-budget grid shared by every normalized-curve figure.
+
+    A pure function of ``n_grid_points`` with no per-run/per-problem data
+    dependency, so callers recompute it at render time (see
+    :func:`_synthetic_problem_report`'s use of :func:`normalized_curve_grid_lists_over_rows`,
+    which discards the grid it returns) rather than persisting it through
+    JSON, where it would just be redundant state that has to stay in sync
+    with this constant across every problem's intermediate metrics file.
+    """
+    import numpy as np  # lazy import, mirrors _draw_metric_line_panel's own numpy import
+
+    return list(np.linspace(0, 100, n_grid_points))
+
+
+def _run_budget(run: RunSeries) -> float:
+    """This run's own **acquisition** budget -- the denominator for the shared % axis.
+
+    ``run.config["budget"]`` (present on every run's ``.summary.json``
+    ``"config"`` dict for every current experiment config) counts only the
+    acquisition evaluations planned *after* the shared init dataset -- e.g. a
+    run with ``n_init=40``/``budget=100`` reaches ``n_total=140`` individual
+    evaluations total (``n_init`` + ``budget``, confirmed against a real
+    ``.summary.json``: ``n_init=40, budget=100, n_total=140``), so ``x_evals``
+    itself ranges ``[40, 140]``, not ``[0, 100]``. This is why
+    :func:`_row_normalized_method_curves` converts to "% of budget" via
+    ``(x - x_evals[0]) / budget``, not ``x / budget`` -- see that function.
+
+    Falls back to this run's own logged evaluation *span*
+    (``x_evals[-1] - x_evals[0]``, i.e. the acquisition evaluations actually
+    performed) when the config key is absent or not a positive number
+    (defensive only; should not be hit on real sweep data, but keeps this
+    self-consistent with the offset subtracted at the call site rather than
+    raising on a malformed/legacy run). Returns ``0.0`` when neither is
+    available -- callers must treat that as "this run cannot be placed on a %
+    axis" and skip it, exactly like every other "no data" skip in this module
+    (never fabricate a budget).
+    """
+    budget = run.config.get("budget")
+    if budget is not None:
+        try:
+            b = float(budget)
+        except (TypeError, ValueError):
+            b = 0.0
+        if b > 0:
+            return b
+    if run.x_evals:
+        b = float(run.x_evals[-1] - run.x_evals[0])
+        if b > 0:
+            return b
+    return 0.0
+
+
+def _row_normalized_method_curves(
+    row_runs: list[RunSeries],
+    cache: CurveCache,
+    methods: list[str],
+    column_key: str,
+    higher_is_better: bool,
+    pct_grid: list[float],
+    compute_curve,
+) -> dict[str, list[float]]:
+    """One row's per-method mean curve, normalized by this row's own best-ever value.
+
+    ``compute_curve`` is a ``(run) -> Optional[list[float]]`` callable
+    producing a run's raw curve for the column being normalized -- a single
+    metric's own curve (e.g. ``lambda run: (cache.get(run.run_name) or {}).get(spec.key)``)
+    or the point-wise product curve (via :func:`_compute_seed_product_curve`)
+    -- mirroring the callable-per-column pattern
+    :func:`itcas.reporting.ranking._lookup_or_compute_auc` already uses for
+    AUCs. ``cache``/``column_key`` are accepted (rather than baked only into
+    ``compute_curve``) purely for signature/documentation parity with that
+    same pattern; the actual values always come from calling ``compute_curve``.
+
+    Two passes over ``row_runs`` (restricted to ``methods``, exactly like
+    every other row helper in this module/``ranking.py``):
+
+    1. **Find this row's best-ever value** (``row_best``): the max (if
+       ``higher_is_better``) or min (otherwise) of every finite value in
+       every run's curve, across every method being compared -- the same
+       "extreme value anywhere in the row" the AUC-based ratio figures use
+       (:func:`itcas.reporting.ranking.relative_auc_seed_ratios_for_row`),
+       just taken over raw curve points instead of one AUC per seed. Returns
+       ``{}`` if no finite value exists anywhere, or if ``row_best == 0``
+       (an undefined ratio, exactly the same skip condition that function
+       uses).
+    2. **Normalize + align each run onto the shared ``pct_grid``**: divide
+       the run's raw curve by ``row_best``, rescale its own ``x_evals`` to
+       "% of its own budget" *measured from that run's own first checkpoint*
+       (``100 * (x - x_evals[0]) / budget``, :func:`_run_budget`; the run is
+       skipped if its budget is ``<= 0`` or it has no logged checkpoints at
+       all) -- ``x_evals[0]`` is the shared init dataset, not the start of
+       the acquisition budget (see :func:`_run_budget`'s docstring), so
+       leaving it un-subtracted would put every run's first checkpoint at
+       ``x_evals[0] / budget`` (e.g. 40%) instead of 0%, and -- since that
+       ratio varies row to row with each row's own ``n_init``/``budget``
+       mix -- would misalign different rows', methods', and even different
+       metrics' curves against each other despite them all actually starting
+       at the same point in the search (right after the shared init
+       dataset). Then linearly interpolate (``numpy.interp``) the normalized
+       curve onto every point
+       of ``pct_grid`` -- NOT the piecewise-constant forward-fill
+       (:func:`_forward_fill_at`) used elsewhere in this file, see this
+       section's header comment for why (avoids a resampling-induced
+       staircase on the proposed batch method's sparse checkpoints). ``left=
+       nan`` keeps grid points before a run's first checkpoint undefined
+       (never fabricated); ``numpy.interp``'s default ``right`` behavior
+       (held at the curve's last value) matches forward-fill's own behavior
+       past a run's last checkpoint, so nothing changes there. A method's
+       per-run filled curves are then averaged elementwise, filtering NaN
+       manually (``[v for v in col if v == v]``, matching
+       ``_min_med_max``/the ``visualize.py`` mean/std helper's established
+       avoidance of ``numpy.nanmean`` to sidestep all-NaN-slice
+       ``RuntimeWarning`` spam) rather than with a numpy nan-function; a grid
+       index with zero non-NaN contributions across every one of a method's
+       runs stays NaN at that index.
+
+    Returns ``{method: row_curve}`` (each ``row_curve`` the same length as
+    ``pct_grid``) only for methods with at least one non-all-NaN curve --
+    methods with no data for this row/column are simply absent, never given
+    a fabricated all-NaN entry.
+    """
+    import numpy as np  # lazy import, mirrors this module's other lazy numpy imports
+
+    method_set = set(methods)
+    method_runs: dict[str, list[RunSeries]] = {}
+    for run in row_runs:
+        if run.method in method_set:
+            method_runs.setdefault(run.method, []).append(run)
+
+    all_values: list[float] = []
+    for runs in method_runs.values():
+        for run in runs:
+            y = compute_curve(run)
+            if y is None:
+                continue
+            all_values.extend(v for v in y if v == v)  # finite (non-NaN) only
+    if not all_values:
+        return {}
+    row_best = max(all_values) if higher_is_better else min(all_values)
+    if row_best == 0:
+        return {}  # undefined ratio -- skip this row/column, mirrors ranking.py's best==0 skip
+
+    out: dict[str, list[float]] = {}
+    for method in methods:
+        per_run_filled: list[list[float]] = []
+        for run in method_runs.get(method, []):
+            y = compute_curve(run)
+            if y is None:
+                continue
+            budget = _run_budget(run)
+            if budget <= 0 or not run.x_evals:
+                continue
+            normalized = [v / row_best for v in y]
+            n = min(len(run.x_evals), len(normalized))
+            # x_evals[0] is the shared init dataset (e.g. n_init=40), not the
+            # start of the acquisition budget -- see _run_budget's docstring
+            # (x_evals ranges [n_init, n_init+budget], not [0, budget]).
+            # Subtracting it off is what puts every run's own first logged
+            # checkpoint at 0% (not n_init/budget) regardless of that run's
+            # own n_init/budget mix, which is also what makes every method
+            # (they all share one init dataset per row) and every metric
+            # (they all read off the same run's x_evals) line up at the same
+            # 0% origin instead of starting mid-axis at a value that quietly
+            # varied row to row.
+            x0 = run.x_evals[0]
+            x_pct = [100.0 * (x - x0) / budget for x in run.x_evals[:n]]
+            # Linear interpolation, not forward-fill -- see this function's
+            # docstring and this section's header comment for why.
+            filled = np.interp(pct_grid, x_pct, normalized[:n], left=float("nan"))
+            per_run_filled.append([float(v) for v in filled])
+        if not per_run_filled:
+            continue
+        row_curve = []
+        for col in zip(*per_run_filled):
+            finite = [v for v in col if v == v]
+            row_curve.append(sum(finite) / len(finite) if finite else float("nan"))
+        if all(v != v for v in row_curve):
+            continue  # all-NaN -- no grid point had any data for this method
+        out[method] = row_curve
+    return out
+
+
+def normalized_curve_grid_lists_over_rows(
+    rows: list,
+    methods: list[str],
+    metrics: list[MetricSpec] | None = None,
+    n_grid_points: int = 41,
+) -> tuple[list[float], dict[str, dict[str, list[list[float]]]]]:
+    """Return ``(pct_grid, {column_key: {method: [row_curve, ...]}})`` across every row.
+
+    ``rows`` is the same row-agnostic ``(row_label, runs, cache)`` triple
+    every other function in this file/``ranking.py`` consumes -- a row is one
+    problem for the synthetic pipeline, one difficulty level for
+    ``ff_comparison``/``casd_comparison`` -- so this function does not need
+    to know or care which. ``metrics`` defaults to :func:`_ordered_metrics`
+    like every sibling row-aggregate function.
+
+    For each row and each metric in ``metrics``, calls
+    :func:`_row_normalized_method_curves` with that metric's own
+    ``higher_is_better``; for the synthetic ``"product"`` column (the
+    point-wise product across ``metrics``, via
+    :func:`_compute_seed_product_curve`), calls it with
+    ``higher_is_better=True`` -- the product is always higher-is-better by
+    construction, exactly as every other product-column usage in this file
+    already assumes. Both cases always read a run's curve on the ``"evals"``
+    axis (``run.x_evals``, never ``run.x_steps``) -- the only fair shared
+    x-axis between a batch method (one record per algorithmic step) and a
+    sequential one (one record per individual evaluation), exactly the
+    convention every other cross-method figure in this package already
+    follows.
+
+    The returned ``curve_lists[column_key][method]`` is a *list of that
+    row's own curve*, one entry per row where that (column, method) had data
+    -- the curve-valued sibling of ``ranking.rank_lists_over_rows``/
+    ``ranking.relative_auc_ratio_lists_over_rows``'s "list of per-row
+    contributions" shape, just one dimension richer (each list element is
+    itself a curve of length ``len(pct_grid)``, not a scalar). The returned
+    ``pct_grid`` (see :func:`_default_pct_grid`) is a pure function of
+    ``n_grid_points`` with no data dependency; callers that don't need it
+    (e.g. :func:`_synthetic_problem_report`, which only persists this
+    function's second return value to JSON) are expected to discard it and
+    recompute it at render time rather than round-trip it through storage.
+    """
+    if metrics is None:
+        metrics = _ordered_metrics()
+    pct_grid = _default_pct_grid(n_grid_points)
+
+    curve_lists: dict[str, dict[str, list[list[float]]]] = {}
+    for _row_label, row_runs, cache in rows:
+        for spec in metrics:
+            row_curves = _row_normalized_method_curves(
+                row_runs, cache, methods, spec.key, spec.higher_is_better, pct_grid,
+                lambda run, spec=spec, cache=cache: (cache.get(run.run_name) or {}).get(spec.key),
+            )
+            for method, curve in row_curves.items():
+                curve_lists.setdefault(spec.key, {}).setdefault(method, []).append(curve)
+
+        # Raw product of the metrics -- same per-row/per-method pipeline as
+        # the metric columns above, always higher-is-better by construction.
+        row_curves = _row_normalized_method_curves(
+            row_runs, cache, methods, "product", True, pct_grid,
+            lambda run, cache=cache: _compute_seed_product_curve(
+                run, "evals", cache.get(run.run_name) or {}, metrics
+            ),
+        )
+        for method, curve in row_curves.items():
+            curve_lists.setdefault("product", {}).setdefault(method, []).append(curve)
+
+    return pct_grid, curve_lists
+
+
+def _draw_normalized_curve_panel(
+    ax,
+    pct_grid: list[float],
+    curve_lists_col: dict[str, list[list[float]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    method_labels: Optional[dict[str, str]],
+) -> bool:
+    """One panel of :func:`_plot_normalized_avg_curve_figure`: one line + IQR band per method.
+
+    ``curve_lists_col`` is ``{method: [row_curve, ...]}`` for one column --
+    one entry of :func:`normalized_curve_grid_lists_over_rows`'s returned
+    ``curve_lists`` dict. For each method with at least one row curve, at
+    each grid index the finite values across that method's row curves are
+    collected (manual NaN filter, same idiom as
+    :func:`_row_normalized_method_curves`); the line point is their mean and
+    the shaded band spans the 25th-75th percentile (``numpy.percentile`` on
+    the plain filtered list, exactly the established ``np.percentile``
+    idiom :func:`_draw_metric_line_panel` already uses -- only
+    ``nanmean``/``nanpercentile`` *on arrays still containing NaN* are
+    avoided in this module, not ``numpy.percentile`` itself). A row with a
+    single contributing row-curve at some index still renders (a
+    zero-width band there).
+
+    Draws the axis grid only when at least one method actually plotted -- an
+    empty panel is left otherwise bare so the caller can overlay the standard
+    "(no data)" placeholder text exactly like every other panel in this file
+    does, rather than this function drawing that text itself. Returns
+    whether anything was plotted.
+    """
+    import numpy as np  # lazy import, mirrors _draw_metric_line_panel's own numpy import
+
+    ax.tick_params(axis="both", labelsize=10.5)
+    any_data = False
+    for method in methods:
+        row_curves = curve_lists_col.get(method) or []
+        if not row_curves:
+            continue
+        ys: list[float] = []
+        los: list[float] = []
+        his: list[float] = []
+        for col in zip(*row_curves):
+            finite = [v for v in col if v == v]
+            if finite:
+                ys.append(float(sum(finite) / len(finite)))
+                los.append(float(np.percentile(finite, 25)))
+                his.append(float(np.percentile(finite, 75)))
+            else:
+                ys.append(float("nan"))
+                los.append(float("nan"))
+                his.append(float("nan"))
+        if all(v != v for v in ys):  # all NaN -- no data anywhere for this method
+            continue
+        any_data = True
+        style = method_styles.get(method, {})
+        label = method_labels.get(method, method) if method_labels else method
+        ax.plot(
+            pct_grid, ys,
+            color=style.get("color"), linestyle=style.get("linestyle", "-"),
+            linewidth=1.2, label=label,
+        )
+        los_arr = np.array(los, dtype=float)
+        his_arr = np.array(his, dtype=float)
+        if not np.all(np.isnan(los_arr)):  # skip fill_between for an all-NaN band
+            ax.fill_between(
+                pct_grid, los_arr, his_arr, color=style.get("color"), alpha=0.15, linewidth=0,
+            )
+    if any_data:
+        ax.grid(True, alpha=0.25)
+    return any_data
+
+
+def _plot_normalized_avg_curve_figure(
+    pct_grid: list[float],
+    curve_lists: dict[str, dict[str, list[list[float]]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+) -> Optional[Path]:
+    """Standalone line-plot figure: normalized metric curve (+ IQR band) vs % of budget, averaged across rows.
+
+    Same single-row panel layout as :func:`_plot_relative_auc_by_difficulty_figure`
+    (one column per metric in ``metrics_present`` plus a trailing Product
+    column, each titled with a ``↑``/``↓`` direction arrow, ``fig_w = max(3.0
+    * n_cols, 10.0)``, ``fig_h = 3.5``) and the same per-method
+    color/linestyle from ``method_styles`` with one shared legend built from
+    the first panel's handles -- but the x-axis here is **continuous and
+    shared by construction** (every row already normalized onto the same
+    ``pct_grid`` by :func:`normalized_curve_grid_lists_over_rows`), unlike
+    that figure's categorical per-difficulty x-ticks, so every panel (not
+    only the last) gets its own ``"% of evaluation budget"`` x-label.
+
+    ``curve_lists`` is exactly :func:`normalized_curve_grid_lists_over_rows`'s
+    second return value; ``pct_grid`` its first (or
+    :func:`_default_pct_grid`'s output, when reloaded from a JSON summary
+    that only persisted ``curve_lists`` -- see that function's docstring).
+    Each panel is drawn by :func:`_draw_normalized_curve_panel`; when it
+    reports nothing was plotted, this function overlays the standard
+    "(no data)" placeholder text used throughout this file.
+
+    Returns ``None`` (writing nothing) when ``metrics_present`` is empty,
+    exactly the same "no metrics -> no figure" contract as every sibling
+    ``_plot_*_figure``.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    if not metrics_present:
+        return None
+
+    n_cols = len(metrics_present) + 1  # + product
+    fig_w = max(3.0 * n_cols, 10.0)
+    # Slightly taller than _plot_relative_auc_by_difficulty_figure's
+    # fig_h=3.5: every panel here also carries its own "% of evaluation
+    # budget" x-label (that figure only has categorical x-tick labels, no
+    # axis label), so a little more vertical room keeps the legend from
+    # sitting flush against it.
+    fig_h = 3.75
+    fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    axes = axes[0]
+
+    for c_idx, spec in enumerate(metrics_present):
+        ax = axes[c_idx]
+        ok = _draw_normalized_curve_panel(
+            ax, pct_grid, curve_lists.get(spec.key, {}), methods, method_styles, method_labels,
+        )
+        if not ok:
+            ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=12, color="grey")
+        arrow = "↑" if spec.higher_is_better else "↓"
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=12)
+        ax.set_xlabel("% of evaluation budget", fontsize=11)
+        if c_idx == 0:
+            ax.set_ylabel("Avg normalized metrics", fontsize=12)
+
+    ax = axes[-1]
+    ok = _draw_normalized_curve_panel(
+        ax, pct_grid, curve_lists.get("product", {}), methods, method_styles, method_labels,
+    )
+    if not ok:
+        ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
+                transform=ax.transAxes, fontsize=12, color="grey")
+    ax.set_title("Product ↑\n(raw)", fontsize=12)
+    ax.set_xlabel("% of evaluation budget", fontsize=11)
+
+    # bbox_to_anchor's y is pushed a bit below the axes (vs. the -0.05 used
+    # elsewhere in this module) to clear the per-panel x-axis labels above,
+    # without leaving an oversized gap.
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(
+            handles, labels, loc="lower center", ncol=min(len(labels), 6),
+            fontsize=10.5, bbox_to_anchor=(0.5, -0.1),
+        )
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def normalized_avg_curve_figure_over_rows(
+    rows: list,
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+    n_grid_points: int = 41,
+) -> Optional[Path]:
+    """Convenience wrapper for callers that already hold ``rows`` in memory (CASD/FF).
+
+    Just :func:`normalized_curve_grid_lists_over_rows` followed by
+    :func:`_plot_normalized_avg_curve_figure`. The synthetic pipeline cannot
+    use this directly -- its per-problem/aggregate split means no single call
+    site ever holds every problem's ``rows`` in memory at once (see
+    :func:`_synthetic_problem_report`/:func:`_render_synthetic_aggregate`,
+    which call :func:`normalized_curve_grid_lists_over_rows` and
+    :func:`_plot_normalized_avg_curve_figure` separately, at different
+    pipeline stages, with the intermediate ``curve_lists`` persisted to JSON
+    in between).
+    """
+    pct_grid, curve_lists = normalized_curve_grid_lists_over_rows(
+        rows, methods, metrics=metrics_present, n_grid_points=n_grid_points,
+    )
+    return _plot_normalized_avg_curve_figure(
+        pct_grid, curve_lists, methods, method_styles, metrics_present, out_path,
+        method_labels=method_labels,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batch-improvement heatmap: % change in mean AUC, sequential -> batch.
+# ---------------------------------------------------------------------------
+def _plot_batch_improvement_heatmap(
+    pct_by_column: dict[str, dict[str, dict[str, Optional[float]]]],
+    families: list[tuple[str, str, str, str]],
+    difficulties: list[str],
+    metrics_present: list[MetricSpec],
+    out_path: str | Path,
+) -> Optional[Path]:
+    """One PDF: a row of heatmap panels, one per metric (+ ``"product"``).
+
+    Each panel is a ``len(families)`` x ``len(difficulties)`` grid of
+    %-change-in-mean-AUC cells (see
+    :mod:`itcas.reporting.batch_improvement_comparison` for how
+    ``pct_by_column`` is computed -- aggregate-then-ratio across problems,
+    FCFD sign-flipped so positive always means "batch improved", exactly like
+    every other figure in this package's FCFD convention). ``pct_by_column``
+    is ``{column_key: {family_key: {difficulty: pct | None}}}``; a ``None``
+    cell (missing data, or an undefined ratio because the sequential side's
+    aggregate AUC was exactly zero) renders as a fixed neutral grey rather
+    than being drawn as (or confused with) a real 0% cell.
+
+    ``families`` is ``[(family_key, sequential_method, batch_method,
+    display_label), ...]`` in the desired top-to-bottom row order (proposed
+    method first); only ``family_key`` (to look up ``pct_by_column``) and
+    ``display_label`` (the y-tick text) are used here -- the method names
+    themselves are irrelevant to rendering. ``display_label`` is drawn as a
+    y-tick only on the **leftmost** panel -- every panel shares the same row
+    order, so repeating it on all five would waste width without adding
+    information; the freed-up space is what makes each cell large enough to
+    carry its own printed value comfortably. ``difficulties`` is the desired
+    left-to-right column order (raw difficulty tags, e.g. ``"p0_01"``);
+    rendered as a feasible-set percent (``"1%"``, via :func:`_feasible_pct_label`)
+    rather than the raw tag, with one shared x-axis label
+    ("Proportion of the feasible set (i.e., difficulty level)", via
+    ``fig.supxlabel`` -- safe here since, unlike the by-difficulty line
+    figure, this heatmap has no legend below the panels to collide with)
+    instead of repeating an axis title on every panel.
+
+    Each panel is independently colour-scaled (``TwoSlopeNorm(vcenter=0)``
+    over that panel's own finite values' max absolute magnitude) rather than
+    sharing one scale across panels, since different metrics have very
+    different typical %-swing ranges -- forcing a shared scale would wash out
+    a metric with naturally small swings under one with naturally large ones.
+    White is therefore always exactly 0% in every panel; red = regression
+    (batch worse), blue = improvement (batch better), the standard ``RdBu``
+    diverging colormap. Each finite cell is also annotated with its signed
+    percentage (``f"{v:+.0f}%"``), text color switched to white near either
+    saturated end of that panel's own color scale (``0.3 <= norm(v) <= 0.7``
+    stays black) so it stays legible against dark fills; a ``None``/masked
+    cell gets no text, just its fixed grey fill.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.colors
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if not metrics_present:
+        return None
+
+    columns: list[tuple[str, str]] = [(s.key, f"{_SHORT_CURVE_LABELS.get(s.key, s.label)} {'↑' if s.higher_is_better else '↓'}") for s in metrics_present]
+    columns.append(("product", "Product ↑\n(raw)"))
+
+    n_cols = len(columns)
+    n_rows_grid = len(families)
+    n_diffs = len(difficulties)
+    fig_w = max(3.2 * n_cols, 10.0)
+    fig_h = max(0.55 * n_rows_grid + 1.8, 3.5)
+    fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
+    axes = axes[0]
+
+    cmap = matplotlib.colormaps.get_cmap("RdBu").copy()
+    cmap.set_bad(color="lightgrey")
+
+    for c_idx, (column_key, title) in enumerate(columns):
+        ax = axes[c_idx]
+        col_data = pct_by_column.get(column_key, {})
+
+        grid = np.full((n_rows_grid, n_diffs), np.nan, dtype=float)
+        for r_idx, (family_key, _seq, _batch, _label) in enumerate(families):
+            fam_data = col_data.get(family_key, {})
+            for d_idx, diff in enumerate(difficulties):
+                v = fam_data.get(diff)
+                if v is not None:
+                    grid[r_idx, d_idx] = v
+
+        masked = np.ma.masked_invalid(grid)
+        finite_vals = grid[np.isfinite(grid)]
+        m = float(np.max(np.abs(finite_vals))) if finite_vals.size else 1.0
+        if m == 0.0:
+            m = 1.0
+        norm = matplotlib.colors.TwoSlopeNorm(vcenter=0.0, vmin=-m, vmax=m)
+
+        im = ax.imshow(masked, cmap=cmap, norm=norm, aspect="auto")
+        ax.set_xticks(range(n_diffs))
+        ax.set_xticklabels([_feasible_pct_label(d) for d in difficulties], fontsize=10.5)
+        ax.set_yticks(range(n_rows_grid))
+        if c_idx == 0:
+            ax.set_yticklabels([f[3] for f in families], fontsize=10.5)
+        else:
+            # Every panel shares the same row order -- repeating the
+            # family/method names on every panel would waste the width
+            # freed up for larger cells without adding information, so only
+            # the leftmost panel carries them.
+            ax.set_yticklabels([])
+        ax.set_title(title, fontsize=12)
+
+        for r_idx in range(n_rows_grid):
+            for d_idx in range(n_diffs):
+                v = grid[r_idx, d_idx]
+                if not np.isfinite(v):
+                    continue
+                # norm(v) is TwoSlopeNorm's [0, 1] output -- 0.5 is the
+                # (white) center; near either saturated end (dark red/blue)
+                # needs light text, near the white center needs dark text.
+                shade = norm(v)
+                text_color = "black" if 0.3 <= shade <= 0.7 else "white"
+                ax.text(
+                    d_idx, r_idx, f"{v:+.0f}%",
+                    ha="center", va="center", fontsize=10.5, color=text_color,
+                )
+
+        fig.colorbar(im, ax=ax, shrink=0.7)
+
+    fig.supxlabel("Proportion of the feasible set (i.e., difficulty level)", fontsize=12)
     fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1440,6 +2538,7 @@ def _synthetic_problem_report(
     cache: CurveCache,
     *,
     out_dir: str | Path | None = None,
+    auc_cache_dir: str | Path | None = None,
 ) -> tuple[dict[str, dict], list[str]]:
     """One problem's contribution to the synthetic comparison, per difficulty.
 
@@ -1452,13 +2551,31 @@ def _synthetic_problem_report(
     byte-for-byte the same file :func:`summarize_synthetic_comparison` used to
     render inline for this problem's row.
 
+    When ``auc_cache_dir`` is given (see :func:`summarize_synthetic_comparison`
+    / :func:`summarize_synthetic_comparison_problem`), every
+    ``ranking.*`` call below is fed that directory's already-cached per-seed
+    AUCs (:mod:`itcas.reporting.auc_cache`) so it can skip recomputing
+    ``summary._curve_area`` for any ``(run, axis, metric)`` already on disk;
+    newly computed AUCs for this problem's own runs are merged back in before
+    returning. This never changes the returned summary or any figure's
+    content -- a cached AUC is numerically identical to what ``_curve_area``
+    would compute fresh (see ``ranking._lookup_or_compute_auc``).
+
     Returns ``(summary_by_diff, paths_written)`` where ``summary_by_diff`` is
     ``{difficulty: {"metrics_present": [metric_key, ...], "avg_rank":
     {column_key: {method: rank}}, "relative_auc": {column_key: {method:
-    ratio}}, "auc": {method: [seed_aucs]}}}`` -- fully JSON-serializable (see
+    ratio}}, "auc": {method: [seed_aucs]}, "normalized_curve_lists":
+    {column_key: {method: [row_curve]}}}}`` -- fully JSON-serializable (see
     :func:`save_synthetic_problem_metrics`) and exactly what
     :func:`_combine_synthetic_summaries` expects as one entry of its
-    ``summaries_by_problem`` argument.
+    ``summaries_by_problem`` argument. ``normalized_curve_lists`` holds at
+    most one curve per (column, method) here -- this problem's own single
+    row -- exactly mirroring how ``avg_rank``/``relative_auc`` are also
+    single-row contributions at this stage (see
+    :func:`normalized_curve_grid_lists_over_rows`); the shared percent-grid
+    itself is *not* stored here (it is a pure function of the number of grid
+    points, not of any per-problem data -- see :func:`_default_pct_grid`) so
+    it never needs to round-trip through this JSON-serializable summary.
     """
     from .batch_vs_sequential import _collect_product_auc_for_stats, _rows_by_problem, plot_group_grid
     from .method_labels import METHOD_ABBREVIATIONS
@@ -1467,6 +2584,12 @@ def _synthetic_problem_report(
     runs_by_problem = {problem: runs}
     caches_by_problem = {problem: cache}
     auc_by_diff = _collect_product_auc_for_stats(runs_by_problem, caches_by_problem).get(problem, {})
+
+    existing_auc_cache = {}
+    if runs and auc_cache_dir is not None:
+        from .auc_cache import load_auc_cache_for_problem
+
+        existing_auc_cache = load_auc_cache_for_problem(auc_cache_dir, problem, runs=runs)
 
     diffs = sorted({_difficulty_of(r) for r in runs})
     summary: dict[str, dict] = {}
@@ -1490,14 +2613,28 @@ def _synthetic_problem_report(
                 paths.append(str(ok))
 
         metrics_present = _metrics_present_in_rows(rows)
-        avg_rank = average_ranks_over_rows(rows, list(SYNTHETIC_METHODS), _SYNTHETIC_AXIS)
-        relative_auc = relative_auc_ratios_over_rows(rows, list(SYNTHETIC_METHODS), _SYNTHETIC_AXIS)
+        avg_rank = average_ranks_over_rows(
+            rows, list(SYNTHETIC_METHODS), _SYNTHETIC_AXIS, auc_cache=existing_auc_cache
+        )
+        relative_auc = relative_auc_ratios_over_rows(
+            rows, list(SYNTHETIC_METHODS), _SYNTHETIC_AXIS, auc_cache=existing_auc_cache
+        )
+        # Discard the returned pct_grid -- see this function's docstring on
+        # `normalized_curve_lists` for why it's recomputed at render time
+        # (`_default_pct_grid()`) rather than persisted here.
+        normalized_curve_lists = normalized_curve_grid_lists_over_rows(rows, list(SYNTHETIC_METHODS))[1]
         summary[diff] = {
             "metrics_present": [s.key for s in metrics_present],
             "avg_rank": avg_rank,
             "relative_auc": relative_auc,
             "auc": auc_by_diff.get(diff, {}),
+            "normalized_curve_lists": normalized_curve_lists,
         }
+
+    if runs and auc_cache_dir is not None:
+        from .auc_cache import compute_auc_table, save_auc_cache
+
+        save_auc_cache(auc_cache_dir, problem, runs, compute_auc_table(runs, cache))
 
     return summary, paths
 
@@ -1542,21 +2679,39 @@ def _combine_synthetic_summaries(
     :func:`load_synthetic_problem_metrics` (the split aggregate path); both
     produce identical output here since the shape is the same either way.
 
-    Each problem contributes at most one "row" per difficulty, so combining
-    those rows here by plain averaging (``sum(values) / len(values)``)
-    reproduces exactly the final reduction step inside
-    ``ranking.average_ranks_over_rows``/``relative_auc_ratios_over_rows``
-    (see the section docstring above), just performed over pre-computed
-    per-row scalars instead of raw runs.
+    Each problem contributes at most one "row" per difficulty. Rather than
+    reducing those rows straight to a mean (the final step inside
+    ``ranking.average_ranks_over_rows``/``relative_auc_ratios_over_rows``,
+    see the section docstring above), this collects each difficulty's raw
+    per-problem values as lists (``avg_rank_lists``/``relative_auc_lists``)
+    -- exactly the shape ``ranking.rank_lists_over_rows``/
+    ``ranking.relative_auc_ratio_lists_over_rows`` would produce had they
+    been called directly over every problem's row at once, since a
+    per-problem job's own ``avg_rank``/``relative_auc`` entry (see
+    :func:`_synthetic_problem_report`) is already exactly one row's
+    contribution to those lists. Reducing further to a mean, when wanted, is
+    now the caller's job (:func:`_render_synthetic_aggregate` passes these
+    lists straight to the boxplot figures, which do their own
+    mean-based sort without needing a separate scalar reduction here).
 
-    Returns ``{difficulty: {"metrics_present": [MetricSpec, ...], "avg_rank":
-    {column_key: {method: avg_rank}}, "relative_auc": {column_key: {method:
-    avg_ratio}}, "n_rows": int, "auc_by_problem": {problem: {method:
-    [seed_aucs]}}}}`` -- ``n_rows`` is the number of problems present at that
-    difficulty, matching ``len(rows)`` in the old monolithic pipeline exactly
-    (a problem is "present" at a difficulty iff its own per-problem job found
-    at least one run there, which is precisely when it wrote an entry for
-    that difficulty in its summary).
+    Returns ``{difficulty: {"metrics_present": [MetricSpec, ...],
+    "avg_rank_lists": {column_key: {method: [rank, ...]}},
+    "relative_auc_lists": {column_key: {method: [ratio, ...]}}, "n_rows":
+    int, "auc_by_problem": {problem: {method: [seed_aucs]}},
+    "normalized_curve_lists": {column_key: {method: [row_curve, ...]}}}}`` --
+    ``n_rows`` is the number of problems present at that difficulty, matching
+    ``len(rows)`` in the old monolithic pipeline exactly (a problem is
+    "present" at a difficulty iff its own per-problem job found at least one
+    run there, which is precisely when it wrote an entry for that difficulty
+    in its summary). ``normalized_curve_lists`` is collected the same way as
+    ``avg_rank_lists``/``relative_auc_lists`` -- one problem's at-most-one-row
+    contribution appended per column/method -- except each appended element
+    is itself a whole curve (that problem's own row curve) rather than a
+    scalar, exactly reproducing what
+    :func:`normalized_curve_grid_lists_over_rows` would return had it been
+    called directly over every problem's row at once (see this module's
+    "Normalized average curve" section docstring for why that equivalence
+    holds).
     """
     diffs: set[str] = set()
     for diff_map in summaries_by_problem.values():
@@ -1568,6 +2723,7 @@ def _combine_synthetic_summaries(
         rank_lists: dict[str, dict[str, list[float]]] = {}
         ratio_lists: dict[str, dict[str, list[float]]] = {}
         auc_by_problem: dict[str, dict[str, list[float]]] = {}
+        curve_lists: dict[str, dict[str, list[list[float]]]] = {}
         n_rows = 0
         for problem, diff_map in summaries_by_problem.items():
             entry = diff_map.get(diff)
@@ -1581,25 +2737,21 @@ def _combine_synthetic_summaries(
             for column_key, method_vals in (entry.get("relative_auc") or {}).items():
                 for method, val in method_vals.items():
                     ratio_lists.setdefault(column_key, {}).setdefault(method, []).append(val)
+            for column_key, method_curves in (entry.get("normalized_curve_lists") or {}).items():
+                for method, curves in method_curves.items():
+                    curve_lists.setdefault(column_key, {}).setdefault(method, []).extend(curves)
             if entry.get("auc"):
                 auc_by_problem[problem] = entry["auc"]
 
-        avg_rank = {
-            ck: {m: sum(vs) / len(vs) for m, vs in md.items() if vs}
-            for ck, md in rank_lists.items()
-        }
-        relative_auc = {
-            ck: {m: sum(vs) / len(vs) for m, vs in md.items() if vs}
-            for ck, md in ratio_lists.items()
-        }
         metrics_present = [s for s in _ordered_metrics() if s.key in metric_keys]
 
         out[diff] = {
             "metrics_present": metrics_present,
-            "avg_rank": avg_rank,
-            "relative_auc": relative_auc,
+            "avg_rank_lists": rank_lists,
+            "relative_auc_lists": ratio_lists,
             "n_rows": n_rows,
             "auc_by_problem": auc_by_problem,
+            "normalized_curve_lists": curve_lists,
         }
     return out
 
@@ -1614,14 +2766,38 @@ def _render_synthetic_aggregate(
     Shared by :func:`summarize_synthetic_comparison` (monolithic, in-memory)
     and :func:`summarize_synthetic_comparison_aggregate` (split, disk-backed)
     so both write byte-for-byte the same
-    ``synthetic_comparison_avg_rank_vs_evaluations.pdf``,
-    ``synthetic_comparison_relative_auc_vs_evaluations.pdf``, and
-    ``synthetic_comparison_stats_report.{json,md}`` per difficulty, plus one
-    top-level ``synthetic_comparison_relative_auc_by_difficulty.pdf`` (see
-    :func:`_plot_relative_auc_by_difficulty_figure`) spanning every
-    difficulty at once -- unlike the three per-difficulty outputs above, this
-    one is written directly under ``output_dir``, not a per-difficulty
-    subfolder.
+    ``synthetic_comparison_avg_rank_vs_evaluations.pdf`` (a **boxplot**, one
+    box per method showing that method's rank distribution across the
+    problems present at that difficulty -- see :func:`_plot_avg_rank_box_figure`),
+    ``synthetic_comparison_relative_auc_vs_evaluations.pdf`` (likewise a
+    boxplot of relative-AUC ratios -- see :func:`_plot_relative_auc_box_figure`),
+    and ``synthetic_comparison_stats_report.{json,md}`` per difficulty, plus
+    two top-level figures spanning every difficulty at once -- unlike the
+    three per-difficulty outputs above, these two are written directly under
+    ``output_dir``, not a per-difficulty subfolder:
+
+    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` (see
+      :func:`_plot_relative_auc_by_difficulty_figure`). Its shaded band shows
+      spread **across problems** at each difficulty, not across seeds: a
+      "row" in this split/aggregate pipeline already collapses each
+      problem's own seeds down to one ratio inside its own per-problem job
+      (see :func:`_synthetic_problem_report`), so the only variation left to
+      show here is across the problems sharing a difficulty -- unlike
+      ``ff_comparison``/``casd_comparison``, whose by-difficulty band shows
+      spread across seeds within one real-world problem's own rows.
+    * ``synthetic_comparison_normalized_avg_curve_vs_pct_budget.pdf`` (see
+      :func:`_plot_normalized_avg_curve_figure` and this module's
+      "Normalized average curve" section docstring): each metric's -- plus
+      product's -- curve, normalized to its own (problem, difficulty) row's
+      best and averaged, with a shaded IQR band, over *every* row across
+      *every* problem and *every* difficulty at once -- unlike the two
+      figures above, this one is not split per difficulty at all (every
+      difficulty's own per-problem row curves, already computed once per
+      problem in :func:`_synthetic_problem_report`, are pooled into a single
+      list per method/column here), since its x-axis is already "% of each
+      row's own evaluation budget" rather than difficulty, so folding
+      difficulty into the same across-row pooling as problems needs no
+      separate axis.
     """
     from .method_labels import METHOD_ABBREVIATIONS
 
@@ -1635,8 +2811,8 @@ def _render_synthetic_aggregate(
         n_rows = entry["n_rows"]
 
         avg_rank_path = diff_dir / "synthetic_comparison_avg_rank_vs_evaluations.pdf"
-        ok = _plot_avg_rank_figure(
-            entry["avg_rank"], list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
+        ok = _plot_avg_rank_box_figure(
+            entry["avg_rank_lists"], list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
             metrics_present, n_rows, avg_rank_path,
             method_labels=METHOD_ABBREVIATIONS,
         )
@@ -1644,10 +2820,10 @@ def _render_synthetic_aggregate(
             paths.append(str(ok))
 
         relative_auc_path = diff_dir / "synthetic_comparison_relative_auc_vs_evaluations.pdf"
-        ok = _plot_relative_auc_figure(
-            entry["relative_auc"], list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
+        ok = _plot_relative_auc_box_figure(
+            entry["relative_auc_lists"], list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
             metrics_present, n_rows, relative_auc_path,
-            method_labels=METHOD_ABBREVIATIONS,
+            method_labels=METHOD_ABBREVIATIONS, x_axis_label="Avg relative AUC",
         )
         if ok is not None:
             paths.append(str(ok))
@@ -1667,18 +2843,52 @@ def _render_synthetic_aggregate(
 
     # One top-level (not per-difficulty) line-plot figure spanning every
     # difficulty at once -- see _plot_relative_auc_by_difficulty_figure and
-    # this function's own docstring. `combined[diff]["relative_auc"]` is
-    # already exactly one difficulty's own {column_key: {method: ratio}}
-    # (averaged across problems present at that difficulty, never across
-    # difficulties), so no further per-level computation is needed here.
+    # this function's own docstring. `combined[diff]["relative_auc_lists"]`
+    # is already exactly one difficulty's own {column_key: {method: [ratio,
+    # ...]}} -- one ratio per problem present at that difficulty, never
+    # averaged across difficulties -- so no further per-level computation is
+    # needed here; `_draw_metric_line_panel` does its own mean-point/IQR-band
+    # reduction from this list. As noted in this function's docstring, the
+    # resulting band shows spread across *problems*, not seeds.
     if combined:
-        relative_auc_by_level = [(diff, combined[diff]["relative_auc"]) for diff in sorted(combined)]
+        # Tick labels are the feasible-fraction percent (e.g. "1%" for the
+        # p0_01/threshold_pct=0.01 level), not the raw key -- see
+        # _feasible_pct_label; only valid for this shared standard-problem
+        # difficulty scale (feasible-fraction thresholds), unlike FF/CASD's
+        # own arbitrary numbered tiers.
+        relative_auc_by_level = [
+            (_feasible_pct_label(diff), combined[diff]["relative_auc_lists"])
+            for diff in sorted(combined)
+        ]
         metric_keys_all = {s.key for e in combined.values() for s in e["metrics_present"]}
         metrics_present_all = [s for s in _ordered_metrics() if s.key in metric_keys_all]
         by_diff_path = out_dir / "synthetic_comparison_relative_auc_by_difficulty.pdf"
         ok = _plot_relative_auc_by_difficulty_figure(
             relative_auc_by_level, list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
             metrics_present_all, by_diff_path, method_labels=METHOD_ABBREVIATIONS,
+            x_axis_label="Proportion of the feasible set (i.e., difficulty level)",
+        )
+        if ok is not None:
+            paths.append(str(ok))
+
+        # Pool every (problem, difficulty) row's own normalized curve list
+        # (each already computed once per problem in
+        # _synthetic_problem_report and collected per-difficulty by
+        # _combine_synthetic_summaries) into one {column_key: {method:
+        # [row_curve, ...]}} spanning every problem and every difficulty at
+        # once -- see this function's docstring for why this figure, unlike
+        # the two above, is never split per difficulty.
+        normalized_curve_lists: dict[str, dict[str, list[list[float]]]] = {}
+        for entry in combined.values():
+            for column_key, method_curves in (entry.get("normalized_curve_lists") or {}).items():
+                for method, curves in method_curves.items():
+                    normalized_curve_lists.setdefault(column_key, {}).setdefault(method, []).extend(curves)
+
+        normalized_curve_path = out_dir / "synthetic_comparison_normalized_avg_curve_vs_pct_budget.pdf"
+        ok = _plot_normalized_avg_curve_figure(
+            _default_pct_grid(), normalized_curve_lists, list(SYNTHETIC_METHODS),
+            _SYNTHETIC_METHOD_STYLES, metrics_present_all, normalized_curve_path,
+            method_labels=METHOD_ABBREVIATIONS,
         )
         if ok is not None:
             paths.append(str(ok))
@@ -1691,8 +2901,18 @@ def summarize_synthetic_comparison(
     problems_config: str | Path = _DEFAULT_PROBLEMS_CONFIG,
     output_dir: str | Path | None = None,
     alpha: float = 0.05,
+    auc_cache_dir: str | Path | None = None,
 ) -> list[str]:
     """ITCAS (batch) vs 5 baselines on every synthetic problem, one folder per difficulty.
+
+    ``auc_cache_dir`` (see :mod:`itcas.reporting.auc_cache`) defaults to
+    ``Path(input_dir).parent / "auc_cache"`` when ``None`` -- a stable
+    location shared across every report/problem regardless of
+    ``output_dir`` (which varies per run, including throwaway smoke-test
+    dirs). Passed through to :func:`_synthetic_problem_report` for each
+    problem so its ``ranking.*`` calls can skip recomputing AUCs already on
+    disk; this never changes any figure's content, only how fast it's
+    produced.
 
     Writes, under ``<output_dir>/<difficulty>/``:
 
@@ -1703,18 +2923,39 @@ def summarize_synthetic_comparison(
       one-problem-per-PDF it added nothing beyond the metric/product curves
       already shown).
     * ``synthetic_comparison_avg_rank_vs_evaluations.pdf`` -- one standalone
-      figure: each method's average rank (1 = best) per metric + product,
-      averaged across every problem at this difficulty (see
-      :func:`_plot_avg_rank_figure` and
-      ``ranking.average_ranks_over_rows``). This used to be a bottom row
-      glued onto the combined grid; it is now its own PDF since there is no
-      longer one combined grid for it to sit under.
+      **boxplot** figure: each metric's (+ product's) column shows one box per
+      method summarizing that method's rank (1 = best) *distribution* across
+      every problem present at this difficulty (see
+      :func:`_plot_avg_rank_box_figure` and
+      ``ranking.rank_lists_over_rows``), rather than collapsing that spread
+      to a single averaged bar. This used to be a bottom row glued onto the
+      combined grid; it is now its own PDF since there is no longer one
+      combined grid for it to sit under.
     * ``synthetic_comparison_relative_auc_vs_evaluations.pdf`` -- one more
-      standalone figure: for each metric (+ product) on each problem, the
-      best AUC across every method/seed is found, every (method, seed) AUC is
-      divided by that best, averaged over seeds then over problems (see
-      :func:`_plot_relative_auc_figure` and
-      ``ranking.relative_auc_ratios_over_rows``).
+      standalone **boxplot** figure: for each metric (+ product) on each
+      problem, the best AUC across every method/seed is found, every
+      (method, seed) AUC is divided by that best and averaged over seeds to
+      get one ratio per problem, then each method's distribution of those
+      per-problem ratios (across every problem at this difficulty) is drawn
+      as a box (see :func:`_plot_relative_auc_box_figure` and
+      ``ranking.relative_auc_ratio_lists_over_rows``).
+    * ``synthetic_comparison_normalized_avg_curve_vs_pct_budget.pdf`` -- a
+      **line-plot** figure of a different shape than the two boxplots above:
+      instead of collapsing each problem's curve to one scalar (an AUC, a
+      rank, a ratio) before combining across problems, each metric's (+
+      product's) raw curve is first normalized by this difficulty's own
+      best-ever value seen anywhere (any method, any seed, any timestep --
+      the same ratio-to-row-best convention the relative-AUC figures above
+      already use, just applied point-wise to the whole curve instead of
+      once to its AUC), then every problem's normalized curve is averaged
+      point-wise on the shared "% of that problem's own evaluation budget"
+      x-axis (:func:`_run_budget`; needed here specifically because
+      synthetic problems' own budgets differ, 100 or 200 -- unlike
+      ``ff_comparison``/``casd_comparison``, whose rows already share one
+      fixed budget) -- one line + shaded IQR band per method per column, the
+      band showing spread **across problems** at this difficulty (see
+      :func:`_plot_normalized_avg_curve_figure` and
+      :func:`normalized_curve_grid_lists_over_rows`).
     * ``synthetic_comparison_stats_report.{json,md}`` -- Friedman-gated,
       Holm-Bonferroni corrected one-sided paired Wilcoxon dominance test
       (``H1: itcas_ndig > baseline``) against each of the five baselines,
@@ -1724,11 +2965,16 @@ def summarize_synthetic_comparison(
     per-difficulty subfolder, since it spans every difficulty at once):
 
     * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` -- a line-plot
-      sibling of the per-difficulty relative-AUC bar chart above: instead of
-      averaging each method's relative-AUC ratio across difficulties into one
-      bar, one line per method is drawn across difficulty levels on the
-      x-axis, so a method's trend as the problem gets harder/easier stays
-      visible (see :func:`_plot_relative_auc_by_difficulty_figure`).
+      sibling of the per-difficulty relative-AUC boxplot above: instead of
+      showing each method's ratio distribution as a box at one difficulty,
+      one line per method is drawn across difficulty levels on the x-axis
+      (each line point the mean of that difficulty's per-problem ratios), so
+      a method's trend as the problem gets harder/easier stays visible; a
+      shaded band around each line shows the interquartile spread **across
+      problems** at that difficulty (not across seeds -- each problem's own
+      seeds are already averaged down to one ratio before this figure ever
+      sees them, see :func:`_render_synthetic_aggregate`'s docstring) (see
+      :func:`_plot_relative_auc_by_difficulty_figure`).
 
     See the module-level section docstring above for why this only ever uses
     the evaluations axis and excludes the real-world problems
@@ -1748,9 +2994,15 @@ def summarize_synthetic_comparison(
     input_path = Path(input_dir)
     problems = _synthetic_problems(problems_config)
     out_dir = Path(output_dir) if output_dir is not None else Path(_SYNTHETIC_OUTPUT_DIR)
+    resolved_auc_cache_dir = (
+        Path(auc_cache_dir) if auc_cache_dir is not None else Path(input_dir).parent / "auc_cache"
+    )
 
     runs_by_problem = _collect_family_runs(input_path, problems, list(SYNTHETIC_METHODS))
-    caches_by_problem = {p: _precompute(runs) for p, runs in runs_by_problem.items() if runs}
+    caches_by_problem = {
+        p: _precompute_cached(runs, resolved_auc_cache_dir, p)
+        for p, runs in runs_by_problem.items() if runs
+    }
 
     summaries_by_problem: dict[str, dict[str, dict]] = {}
     paths: list[str] = []
@@ -1759,7 +3011,9 @@ def summarize_synthetic_comparison(
         if not runs:
             continue
         cache = caches_by_problem.get(problem, {})
-        summary, problem_paths = _synthetic_problem_report(problem, runs, cache, out_dir=out_dir)
+        summary, problem_paths = _synthetic_problem_report(
+            problem, runs, cache, out_dir=out_dir, auc_cache_dir=resolved_auc_cache_dir
+        )
         summaries_by_problem[problem] = summary
         paths.extend(problem_paths)
 
@@ -1774,6 +3028,7 @@ def summarize_synthetic_comparison_problem(
     output_dir: str | Path | None = None,
     save_metrics_dir: str | Path | None = None,
     alpha: float = 0.05,
+    auc_cache_dir: str | Path | None = None,
 ) -> list[str]:
     """Per-problem half of the split synthetic-comparison pipeline.
 
@@ -1792,6 +3047,9 @@ def summarize_synthetic_comparison_problem(
     synthetic-comparison entry points but is unused here: the Friedman/
     Wilcoxon stats report needs every problem's raw per-seed AUCs together
     and is only produced by :func:`summarize_synthetic_comparison_aggregate`.
+    ``auc_cache_dir`` (see :mod:`itcas.reporting.auc_cache`) defaults to
+    ``Path(input_dir).parent / "auc_cache"`` when ``None``, mirroring
+    :func:`summarize_synthetic_comparison`.
     """
     from .batch_vs_sequential import _collect_family_runs
 
@@ -1799,6 +3057,9 @@ def summarize_synthetic_comparison_problem(
 
     input_path = Path(input_dir)
     out_dir = Path(output_dir) if output_dir is not None else Path(_SYNTHETIC_OUTPUT_DIR)
+    resolved_auc_cache_dir = (
+        Path(auc_cache_dir) if auc_cache_dir is not None else Path(input_dir).parent / "auc_cache"
+    )
 
     synthetic_problems = _synthetic_problems(problems_config)
     if problem not in synthetic_problems:
@@ -1810,9 +3071,11 @@ def summarize_synthetic_comparison_problem(
     runs = _collect_family_runs(input_path, [problem], list(SYNTHETIC_METHODS)).get(problem, [])
     if not runs:
         return []
-    cache = _precompute(runs)
+    cache = _precompute_cached(runs, resolved_auc_cache_dir, problem)
 
-    summary, paths = _synthetic_problem_report(problem, runs, cache, out_dir=out_dir)
+    summary, paths = _synthetic_problem_report(
+        problem, runs, cache, out_dir=out_dir, auc_cache_dir=resolved_auc_cache_dir
+    )
 
     if save_metrics_dir is not None:
         metrics_path = save_synthetic_problem_metrics(save_metrics_dir, problem, summary)
@@ -1831,15 +3094,22 @@ def summarize_synthetic_comparison_aggregate(
     Reads every ``*_synthetic_metrics.json`` under ``metrics_dir`` (written
     by :func:`summarize_synthetic_comparison_problem`) -- no ``.jsonl`` run
     logs, no ``RunSeries`` reconstruction, for any problem -- and produces,
-    per difficulty found across those files, the same three aggregate
+    per difficulty found across those files, the same four aggregate
     outputs :func:`summarize_synthetic_comparison` writes today:
-    ``synthetic_comparison_avg_rank_vs_evaluations.pdf``,
-    ``synthetic_comparison_relative_auc_vs_evaluations.pdf``, and
+    ``synthetic_comparison_avg_rank_vs_evaluations.pdf`` (a boxplot of each
+    method's rank distribution across problems),
+    ``synthetic_comparison_relative_auc_vs_evaluations.pdf`` (likewise a
+    boxplot of relative-AUC ratio distributions),
+    ``synthetic_comparison_normalized_avg_curve_vs_pct_budget.pdf`` (each
+    metric's -- plus product's -- row-best-normalized curve, averaged across
+    problems on the shared "% of each problem's own evaluation budget"
+    x-axis, with a shaded IQR band across problems), and
     ``synthetic_comparison_stats_report.{json,md}``, all under
     ``<output_dir>/<difficulty>/`` -- plus the same top-level
-    ``synthetic_comparison_relative_auc_by_difficulty.pdf`` line-plot figure
-    (see :func:`summarize_synthetic_comparison`'s docstring), written
-    directly under ``<output_dir>``.
+    ``synthetic_comparison_relative_auc_by_difficulty.pdf`` line-plot-plus-
+    shaded-band figure (spread across problems at each difficulty, see
+    :func:`summarize_synthetic_comparison`'s docstring), written directly
+    under ``<output_dir>``.
     """
     metrics_path = Path(metrics_dir)
     out_dir = Path(output_dir) if output_dir is not None else metrics_path.parent
@@ -2105,9 +3375,83 @@ def main(argv: Optional[list[str]] = None) -> int:
             "--alpha. Does not require --input-dir and never reads any run logs."
         ),
     )
+    parser.add_argument(
+        "--auc-cache-dir", type=str, default=None, dest="auc_cache_dir",
+        help=(
+            "Directory for the disk-backed per-seed metric-AUC cache (see "
+            "itcas.reporting.auc_cache), used by --synthetic-comparison and "
+            "--synthetic-comparison-problem. Defaults to <input-dir's parent>/auc_cache."
+        ),
+    )
+    parser.add_argument(
+        "--method-group", type=str, default=None, choices=["batch", "sequential"],
+        dest="method_group",
+        help=(
+            "Which method-group comparison to run (see "
+            "itcas.reporting.method_group_comparison): 'batch' compares the 5 batch "
+            "methods against each other, 'sequential' the 5 sequential methods against "
+            "each other. Required together with --method-group-comparison-problem or "
+            "--method-group-comparison-aggregate-from."
+        ),
+    )
+    parser.add_argument(
+        "--method-group-comparison-problem", type=str, default=None,
+        dest="method_group_comparison_problem",
+        help=(
+            "Per-problem half of the split method-group-comparison pipeline (see "
+            "summarize_method_group_comparison_problem): loads only this one problem's "
+            "runs for the --method-group given, and -- when --save-metrics is given -- "
+            "writes <save-metrics>/<problem>_<method-group>_comparison_metrics.json for "
+            "a later --method-group-comparison-aggregate-from run. Paired with "
+            "--input-dir/--method-group/--save-metrics/--problems-config/--auc-cache-dir. "
+            "Renders no per-problem plot -- --output-dir is unused here."
+        ),
+    )
+    parser.add_argument(
+        "--method-group-comparison-aggregate-from", type=str, default=None,
+        dest="method_group_comparison_aggregate_from",
+        help=(
+            "Aggregate half of the split method-group-comparison pipeline (see "
+            "summarize_method_group_comparison_aggregate): loads every "
+            "*_<method-group>_comparison_metrics.json under this directory (written by "
+            "--method-group-comparison-problem runs) and produces the combined "
+            "relative-AUC/normalized-curve figures for that group. Paired with "
+            "--output-dir/--method-group. Does not require --input-dir and never reads "
+            "any run logs."
+        ),
+    )
     args = parser.parse_args(argv)
 
     kw = dict(alpha=args.alpha)
+
+    if args.method_group_comparison_problem is not None:
+        from .method_group_comparison import summarize_method_group_comparison_problem
+
+        if args.input_dir is None:
+            parser.error("--input-dir is required for --method-group-comparison-problem")
+        if args.method_group is None:
+            parser.error("--method-group is required for --method-group-comparison-problem")
+        paths = summarize_method_group_comparison_problem(
+            args.input_dir, args.method_group_comparison_problem, args.method_group,
+            problems_config=args.problems_config, output_dir=args.output_dir,
+            save_metrics_dir=args.save_metrics, auc_cache_dir=args.auc_cache_dir,
+        )
+        for p in paths:
+            print(p)
+        return 0
+
+    if args.method_group_comparison_aggregate_from is not None:
+        from .method_group_comparison import summarize_method_group_comparison_aggregate
+
+        if args.method_group is None:
+            parser.error("--method-group is required for --method-group-comparison-aggregate-from")
+        paths = summarize_method_group_comparison_aggregate(
+            args.method_group_comparison_aggregate_from, args.method_group,
+            output_dir=args.output_dir,
+        )
+        for p in paths:
+            print(p)
+        return 0
 
     if args.synthetic_comparison_problem is not None:
         if args.input_dir is None:
@@ -2115,7 +3459,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         paths = summarize_synthetic_comparison_problem(
             args.input_dir, args.synthetic_comparison_problem,
             problems_config=args.problems_config, output_dir=args.output_dir,
-            save_metrics_dir=args.save_metrics, **kw,
+            save_metrics_dir=args.save_metrics, auc_cache_dir=args.auc_cache_dir, **kw,
         )
         for p in paths:
             print(p)
@@ -2134,7 +3478,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             parser.error("--input-dir is required for --synthetic-comparison")
         paths = summarize_synthetic_comparison(
             args.input_dir, problems_config=args.problems_config,
-            output_dir=args.output_dir, **kw,
+            output_dir=args.output_dir, auc_cache_dir=args.auc_cache_dir, **kw,
         )
         for p in paths:
             print(p)

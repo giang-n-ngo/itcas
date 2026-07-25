@@ -21,10 +21,20 @@ METHOD_ABBREVIATIONS: dict[str, str] = {
     "random": "Random",
     "straddle_then_sample_lse10": "STR-TS-10",
     "bes_then_sample_lse10": "BES-TS-10",
-    # "-B" (batch) distinguishes the proposed full-ITCAS/NDIG method from its
-    # forced-sequential sibling itcas_seq_ndig (not yet abbreviated here --
-    # add "NDIG-S" or similar if a report ever needs to show both together).
+    # "-B" (batch) distinguishes the proposed full-ITCAS/NDIG method
+    # (QD-DPP greedy batch selection) from its forced-sequential sibling
+    # itcas_seq_ndig, which gets the bare "NDIG" label -- see
+    # ndig_comparison.py, which shows both together.
     "itcas_ndig": "NDIG-B",
+    "itcas_seq_ndig": "NDIG",
+    # Same "-B" convention extended to the other three method families' own
+    # DPP-batch variants -- see method_group_comparison.py, which shows a
+    # method's batch and sequential siblings in two separate reports rather
+    # than side by side, but still wants the same short/consistent labels.
+    "cas_eci_batch": "ECI-B",
+    "moc_cas_hard_batch": "MOC-CAS-B",
+    "straddle_then_sample_lse10_batch": "STR-TS-10-B",
+    "bes_then_sample_lse10_batch": "BES-TS-10-B",
 }
 
 

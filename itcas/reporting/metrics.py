@@ -181,11 +181,48 @@ def feasible_convex_hull_volume_curve(run: RunSeries) -> list[float]:
 _EXPERIMENTS_PATH = Path(__file__).parent.parent.parent / "configs" / "experiments.json"
 
 
+def _diff_key_candidates(threshold_pct) -> list[str]:
+    """Candidate ``configs/experiments.json`` difficulty-key strings for ``threshold_pct``.
+
+    ``threshold_pct`` reaches this function as a Python float (parsed back out
+    of a run's own logged config), but the config's own keys are plain JSON
+    string literals written by hand/by the calibration tooling in two
+    different styles depending on the problem: bare integers for FF/CASD's
+    own difficulty scales (``"1"``..``"10"``, ``"1"``..``"4"``) vs. decimal
+    fractions for every "standard" problem's shared threshold_pct scale
+    (``"0.01"``, ``"0.05"``, ``"0.1"``, ``"0.2"``). ``str(threshold_pct)``
+    alone only ever produces the decimal style (``str(2.0) == "2.0"``, never
+    matching a bare ``"2"`` key), so FF/CASD's per-difficulty overrides were
+    silently invisible to this lookup -- always falling through to the
+    problem-level default -- until this was fixed. Returns candidates in
+    lookup-preference order: the bare-integer form first when
+    ``threshold_pct`` is a whole number (matching FF/CASD's style), then the
+    plain ``str()`` form (matching every other problem's style) so a config
+    that genuinely uses a decimal key for a whole-number-valued level (not
+    currently the case anywhere, but not excluded either) still resolves.
+    """
+    candidates = []
+    try:
+        f = float(threshold_pct)
+    except (TypeError, ValueError):
+        f = None
+    if f is not None and f.is_integer():
+        candidates.append(str(int(f)))
+    candidates.append(str(threshold_pct))
+    return candidates
+
+
 def _eps_from_experiments(problem: str, threshold_pct: Optional[str]) -> Optional[float]:
     """Return eps_archive for (problem, difficulty) from configs/experiments.json.
 
     Resolution order mirrors the shell launcher:
       problems[problem][threshold_pct] -> problems[problem].defaults -> defaults
+
+    ``threshold_pct`` is matched against the config's difficulty keys via
+    :func:`_diff_key_candidates`, which tries both the bare-integer style
+    (FF/CASD) and the plain ``str()`` decimal style (every other problem) --
+    see that function's docstring for why a single ``str(threshold_pct)``
+    lookup silently missed FF/CASD's per-difficulty overrides.
 
     Returns None if the file is missing or the problem is not listed.
     """
@@ -198,14 +235,32 @@ def _eps_from_experiments(problem: str, threshold_pct: Optional[str]) -> Optiona
     if prob is None:
         return top_default
     prob_default = prob.get("defaults", {}).get("eps_archive")
-    diff_key = str(threshold_pct) if threshold_pct is not None else None
-    if diff_key is not None:
-        diff_eps = prob.get(diff_key, {}).get("eps_archive")
-        if diff_eps is not None:
-            return float(diff_eps)
+    if threshold_pct is not None:
+        for diff_key in _diff_key_candidates(threshold_pct):
+            diff_eps = prob.get(diff_key, {}).get("eps_archive")
+            if diff_eps is not None:
+                return float(diff_eps)
     if prob_default is not None:
         return float(prob_default)
     return float(top_default) if top_default is not None else None
+
+
+def eps_archive_used(run: RunSeries) -> float:
+    """Resolve the ``eps`` value :func:`epsilon_archive_size_curve` uses for ``run``.
+
+    Single source of truth for this resolution (``threshold_pct`` from
+    ``run.config["extra"]`` -> :func:`_eps_from_experiments` ->
+    ``run.config["eps_archive"]`` -> ``0.05``), so any caller that needs to
+    know *which* eps a cached curve was computed under (to detect a stale
+    on-disk cache after ``configs/experiments.json`` is recalibrated -- see
+    ``itcas.reporting.summary._precompute_cached``) resolves it exactly the
+    same way the curve itself was computed, instead of duplicating this logic.
+    """
+    threshold_pct = (run.config.get("extra") or {}).get("threshold_pct")
+    return (
+        _eps_from_experiments(run.problem, threshold_pct)
+        or float(run.config.get("eps_archive", 0.05))
+    )
 
 
 def epsilon_archive_size_curve(run: RunSeries) -> list[float]:
@@ -216,19 +271,16 @@ def epsilon_archive_size_curve(run: RunSeries) -> list[float]:
     calibration space — see `contexts/metrics.md` §4) and processed in
     chronological order. A point is admitted to the archive only if its
     transform is at least ``eps`` away (Euclidean) from every existing archive
-    member's transform, where ``eps`` is read from
-    ``run.config["eps_archive"]`` (default 0.05). The curve is the archive size
+    member's transform, where ``eps`` is resolved by :func:`eps_archive_used`
+    (``configs/experiments.json`` calibration, falling back to
+    ``run.config["eps_archive"]`` then 0.05). The curve is the archive size
     at each algorithmic step.
 
     The archive is built once over the full feasible set (in insertion order)
     and per-step values are resolved with a single binary-search pass, so cost
     is O(N_feas²) in the worst case but avoids redundant recomputation per step.
     """
-    threshold_pct = (run.config.get("extra") or {}).get("threshold_pct")
-    eps: float = (
-        _eps_from_experiments(run.problem, threshold_pct)
-        or float(run.config.get("eps_archive", 0.05))
-    )
+    eps: float = eps_archive_used(run)
 
     Y_final = run.Y_per_step[-1] if run.Y_per_step else None
     if Y_final is None or Y_final.numel() == 0:

@@ -449,21 +449,32 @@ def _qd_marginal_gain(
     ctxB: Optional[torch.Tensor],
     lam_obj: float,
     lam_ctx: Optional[float],
+    disable_kernel: Optional[str] = None,
 ) -> torch.Tensor:
     """Greedy marginal gain ``log det(I+L_{B u z}) - log det(I+L_B)`` per candidate.
 
     ``gain(z) = log(1 + L_zz - L_zB (I + L_BB)^-1 L_Bz)`` (Schur complement),
     with ``L_zz = q(z)^2`` since the diversity kernel is unit on the diagonal.
+
+    ``disable_kernel`` ablates one half of the joint diversity kernel
+    ``k_obj(mu_i, mu_j) * k_ctx(c_i, c_j)`` (see module docstring): ``"obj"``
+    forces ``k_obj`` to the constant 1 (batch diversity driven by context
+    alone), ``"ctx"`` forces ``k_ctx`` to the constant 1 (batch diversity
+    driven by the objective-space prediction alone, even when context
+    dimensions are present). ``None`` (default) keeps the full joint kernel.
     """
     diag = qN.clamp_min(0.0).pow(2)  # (N,)
     if qB is None or qB.numel() == 0:
         return torch.log1p(diag)
 
     def cross_kernel(mu_a, ctx_a, mu_b, ctx_b):
-        # objective-space RBF between two sets
-        sq = torch.cdist(mu_a, mu_b).pow(2)
-        k = torch.exp(-sq / (2.0 * lam_obj * lam_obj))
-        if ctx_a is not None and ctx_b is not None and lam_ctx is not None:
+        if disable_kernel == "obj":
+            k = torch.ones(mu_a.shape[0], mu_b.shape[0], dtype=mu_a.dtype, device=mu_a.device)
+        else:
+            # objective-space RBF between two sets
+            sq = torch.cdist(mu_a, mu_b).pow(2)
+            k = torch.exp(-sq / (2.0 * lam_obj * lam_obj))
+        if disable_kernel != "ctx" and ctx_a is not None and ctx_b is not None and lam_ctx is not None:
             sqc = torch.cdist(ctx_a, ctx_b).pow(2)
             k = k * torch.exp(-sqc / (2.0 * lam_ctx * lam_ctx))
         return k
@@ -498,6 +509,7 @@ def select_batch_continuous(
     rng_seed: Optional[int] = None,
     t: int = 0,
     X_obs: Optional[torch.Tensor] = None,
+    disable_kernel: Optional[str] = None,
 ) -> tuple[torch.Tensor, dict]:
     """Run the full continuous C-MO-CAS acquisition and return the batch.
 
@@ -514,6 +526,13 @@ def select_batch_continuous(
             coordinates), forwarded to ``build_quality_fn``. Only consumed by
             ``cr_ndig`` (context-repulsion against acquisition history); every
             other variant ignores it.
+        disable_kernel: optional QD-DPP diversity-kernel ablation, forwarded to
+            ``_qd_marginal_gain``: ``"obj"`` drops ``k_obj`` (diversity driven
+            by context alone), ``"ctx"`` drops ``k_ctx`` (diversity driven by
+            the objective-space prediction alone). ``None`` (default) keeps
+            the full joint kernel. Used by the ``ndig_no_kobj``/``ndig_no_kctx``
+            ablation baselines (see ``pipeline/loop.py``'s
+            ``NDIG_KERNEL_ABLATION``); every other caller leaves it ``None``.
 
     Returns ``(X_new, info)`` where ``X_new`` is a ``(b, d)`` tensor of
     selected design-context points ``z = (x, c)`` in the original domain.
@@ -549,7 +568,7 @@ def select_batch_continuous(
             muN = _posterior_mean_grad(models, z)
             ctxN = _context(z, context_dims)
             return _qd_marginal_gain(
-                qN, muN, ctxN, qB, muB, ctxB, lam_obj, lam_ctx
+                qN, muN, ctxN, qB, muB, ctxB, lam_obj, lam_ctx, disable_kernel
             )
 
         Z_cand, gains = multistart_ascent(
@@ -583,5 +602,6 @@ def select_batch_continuous(
         "context_dims": list(context_dims) if context_dims else [],
         "n_restarts": int(n_restarts),
         "gamma": float(gamma),
+        "diversity_kernel_ablation": disable_kernel,
     }
     return X_new.detach(), info

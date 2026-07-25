@@ -182,10 +182,37 @@ def _plot_run_scatter(
 # that no QD-DPP batch diversity is available, so it is always forced to
 # batch_size=1 via `effective_batch_size` (its name is neither `"itcas"` nor
 # `_batch`-suffixed).
+#
+# `ndig_no_kobj`/`ndig_no_kctx` are QD-DPP diversity-kernel ablations of the
+# proposed method's own `itcas`+`quality="ndig"` batch acquisition (the
+# `itcas_ndig` in reporting's family tables): both use the plain `ndig`
+# quality, unchanged, but their `_batch` sibling drops one half of the joint
+# diversity kernel `k_obj(mu_i, mu_j) * k_ctx(c_i, c_j)` from the QD-DPP
+# L-ensemble (see `NDIG_KERNEL_ABLATION` / `continuous._qd_marginal_gain`'s
+# `disable_kernel`) -- `ndig_no_kobj_batch` keeps only `k_ctx` (diversity
+# driven by context alone), `ndig_no_kctx_batch` keeps only `k_obj`
+# (diversity driven by the objective-space prediction alone, even when
+# context dimensions are present). The bare (non-`_batch`) forms are harmless
+# but pointless duplicates of `itcas_seq`+`quality="ndig"`: with
+# `batch_size=1` the QD-DPP cross-kernel never engages regardless of which
+# half is ablated.
 CONTINUOUS_BASELINE_QUALITY = {
     "c2lse": "c2lse",
     "bes": "bes",
     "cr_ndig": "cr_ndig",
+    "ndig_no_kobj": "ndig",
+    "ndig_no_kctx": "ndig",
+}
+
+# Maps the two NDIG QD-DPP kernel-ablation method names (see
+# `CONTINUOUS_BASELINE_QUALITY` above) to the `disable_kernel` value
+# `continuous.select_batch_continuous`/`_qd_marginal_gain` expects. Every
+# other method (including plain `ndig` via `itcas`/`itcas_seq`) is absent
+# here and so gets `None` (full joint kernel) from the `.get(...)` lookup in
+# `_select_continuous`.
+NDIG_KERNEL_ABLATION: dict[str, str] = {
+    "ndig_no_kobj": "obj",
+    "ndig_no_kctx": "ctx",
 }
 
 
@@ -197,9 +224,12 @@ def _is_continuous_method(method: str) -> bool:
     always batch_size=1 -- see `effective_batch_size`), the Family-B
     continuous baselines (`c2lse`/`bes`, each with a fixed quality variant of
     the same name), including their `_batch` suffix forms (batch_size>1 greedy
-    QD-DPP instead of sequential argmax), and `cr_ndig` (contexts/
+    QD-DPP instead of sequential argmax), `cr_ndig` (contexts/
     sequential_ndig.md), the purely-sequential context-repulsive NDIG variant
-    with a fixed quality of the same name and no `_batch` sibling.
+    with a fixed quality of the same name and no `_batch` sibling, and
+    `ndig_no_kobj`/`ndig_no_kctx`, the QD-DPP diversity-kernel ablations of
+    the proposed method's own batch NDIG acquisition (fixed quality `"ndig"`,
+    see `NDIG_KERNEL_ABLATION`), including their `_batch` suffix forms.
 
     Family-C two-stage methods are handled separately (see
     ``TWO_STAGE_BASE`` / ``_stage_for`` / the dispatch branch in
@@ -367,6 +397,12 @@ class ExperimentConfig:
                                       # sequential context-repulsive NDIG variant, fixed
                                       # --quality of the same name, no _batch sibling --
                                       # see CONTINUOUS_BASELINE_QUALITY) |
+                                      # ndig_no_kobj | ndig_no_kctx (QD-DPP diversity-
+                                      # kernel ablations of the proposed method's own
+                                      # batch NDIG acquisition, fixed --quality "ndig";
+                                      # the _batch sibling drops k_obj / k_ctx
+                                      # respectively from the L-ensemble -- see
+                                      # NDIG_KERNEL_ABLATION) |
                                       # random_batch | straddle_batch | cas_eci_batch |
                                       # moc_cas_hard_batch (discrete-pool + QD-DPP
                                       # batch siblings of the sequential baselines) |
@@ -482,6 +518,11 @@ def _select_continuous(
     ``itcas_select_batch`` -> ``build_quality_fn`` to the ``cr_ndig`` builder
     so it can build its context-repulsion penalty against acquisition
     history; every other quality variant ignores it via ``**_``.
+
+    ``base``'s presence in ``NDIG_KERNEL_ABLATION`` (``ndig_no_kobj``/
+    ``ndig_no_kctx``) forwards the corresponding ``disable_kernel`` ablation
+    of the QD-DPP diversity kernel through to ``itcas_select_batch``; every
+    other method gets ``None`` (the full joint kernel), unchanged behavior.
     """
     method = cfg.method if method is None else method
     base = method[:-len("_batch")] if method.endswith("_batch") else method
@@ -495,6 +536,7 @@ def _select_continuous(
         n_restarts=cfg.n_restarts, n_opt_steps=cfg.n_opt_steps, opt_lr=cfg.opt_lr,
         n_ts_samples=cfg.n_ts_samples, dpp_lambda=cfg.dpp_lambda,
         dpp_lambda_ctx=cfg.dpp_lambda_ctx, rng_seed=seed, t=t, X_obs=X_obs,
+        disable_kernel=NDIG_KERNEL_ABLATION.get(base),
     )
 
 

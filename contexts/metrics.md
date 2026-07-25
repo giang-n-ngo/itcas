@@ -71,20 +71,22 @@ $$\text{FCHV} = \text{Volume}(\text{Conv}(Y_{feasible}))$$
 
 **Implementation Logic:**
 
-Data Pooling (Offline): After all algorithms have completed their runs for a specific problem, collect the set of all strictly feasible objective vectors discovered by all methods across all seeds into a single global set, $Y_{global\_feasible}$.
+Data Pooling (Offline): After all algorithms have completed their runs for a specific problem, replay each individual trial's (one method + one seed) own strictly feasible objective vectors, in chronological discovery order.
 
-Log-Transform: Transform the global set based on the distance from the strict threshold $\tau_i$:
+Log-Transform: Transform each trial's own feasible points based on the distance from the strict threshold $\tau_i$:
 
 
 $$y'_{i} = \log(1 + (y_i - \tau_i))$$
 
-Systematic $\epsilon$ Selection:
+Systematic $\epsilon$ Selection (within-trial-gap anchoring — see "Revision note" below for why this replaced the original cross-trial-pool anchoring):
 
-Compute the pairwise Euclidean distance matrix for all points in the transformed global set $Y'_{global\_feasible}$ (e.g., using scipy.spatial.distance.pdist).
+For each individual trial, walk its own chronological feasible sequence $Y'_{trial}$ and, for every point after the first, record its Euclidean distance to the single nearest point *already discovered by that same trial* (i.e. every point is unconditionally treated as "discovered" — no $\epsilon$ threshold applied yet, since $\epsilon$ is exactly what is being calibrated).
 
-Filter out all zero distances (distances between a point and itself, or exact duplicate points).
+Pool these per-trial "nearest-already-discovered" gap values across every trial (all methods, all seeds) for the (problem, difficulty) group into a single population $G_{within\_trial}$.
 
-Set $\epsilon$ to the 5th percentile of these strictly positive pairwise distances (e.g., np.percentile(distances, 5)).
+Filter out all zero gaps (duplicate evaluations within a trial).
+
+Set $\epsilon$ to the 75th percentile of $G_{within\_trial}$ (e.g., np.percentile(gaps, 75)) — a much higher percentile than the original cross-trial-pool anchoring used, because the population being percentiled is different; see "Revision note" and "Note on Percentile Tuning" below.
 
 Archive Construction (Per Algorithm Trial): * Initialize an empty list: archive = []
 
@@ -104,7 +106,13 @@ archive_size[t] = len(archive)
 
 Return: The strictly monotonic archive_size curve over time, and its final scalar value at $T$.
 
-Note on Percentile Tuning: The 5th percentile represents a strict requirement that a new point must be further away than the closest 5% of all points ever discovered to be considered "novel". If the metric still looks too similar to the 'Number of Positives' curve, increase this to the 10th or 15th percentile to demand wider spacing.
+**Revision note (global-pool vs. per-trial scale mismatch):** The original version of this section pooled *all* trials' feasible objective vectors into one combined set $Y_{global\_feasible}$ and set $\epsilon$ to a low percentile (5th, per the original "Note on Percentile Tuning" below) of `scipy.spatial.distance.pdist` over that combined set. On a real dataset (`spacecraft_formation_flying_a1`, difficulty `p2`, ~560 trials across 6+ methods) this produced an $\epsilon$-Archive-Size curve that was still visually indistinguishable from the Number-of-Positives curve, even after following this section's own troubleshooting note and raising the percentile from 5th to 10th.
+
+Diagnosis against the real dataset (not just theorized) found the root cause: the Archive Construction step above compares each new point only against *that same trial's own* archive-so-far, but the old calibration anchored $\epsilon$ against a *cross-trial* population — pairwise distances between points discovered by possibly-different methods/seeds. With ~560 independent trials covering the same feasible region (and many trials' initial designs drawn from the same historical pool), that cross-trial cloud is systematically denser than any single trial's own sequential discoveries, so a low percentile of it produced an $\epsilon$ far smaller than the typical spacing between a single trial's own real, distinct discoveries. Measured directly against real trial reconstructions: at the old calibration (5th percentile of the cross-trial pool, $\epsilon=0.396$) the median trial's final archive size equaled its final positive count exactly (ratio 1.0 — every feasible point admitted); at 10th percentile ($\epsilon=0.534$) the median ratio only improved to 0.83.
+
+The fix: anchor $\epsilon$ against the population the archive-construction step actually compares against — each trial's own "nearest-already-discovered" gap, pooled across trials (not "any two points from possibly-different trials") — and use a much higher percentile of *that* population (see "Note on Percentile Tuning" below for why). Empirically, on the same real dataset, the 75th percentile of the within-trial-gap population produced a median archive/positives ratio of ~0.56 (mean ~0.62) with degenerate collapse (archive stuck at $\le 1$ point despite $>3$ positives) in only 0.4% of trials.
+
+Note on Percentile Tuning: with the corrected within-trial-gap population, a *low* percentile (5th/10th/25th) reproduces the same degenerate ratio-1.0 behavior the original 5th-percentile cross-trial anchoring had — most within-trial consecutive gaps are small by construction (expected local exploration steps), so a low percentile of this population is dominated by small local steps rather than genuine trial-to-trial distinguishability. A percentile in the 70th-75th range was found empirically to be the sweet spot: high enough to separate the archive-size curve from the raw positives curve, while rarely collapsing the archive to a single degenerate point. If a specific problem's $\epsilon$-Archive-Size curve still looks too similar to the Number-of-Positives curve after using the default (75th percentile of the within-trial-gap population), try increasing further (80th-90th); if the archive instead collapses to $\le 1$ point too often, decrease toward 50th-65th.
 
 #### **5. Number of Positives (Sample Count)**
 

@@ -385,7 +385,7 @@ def plot_school_comparison(
         for c_idx, spec in enumerate(metrics_present):
             ax = axes[r_idx][c_idx]
             ax.grid(True, alpha=0.25)
-            ax.tick_params(axis="both", labelsize=7)
+            ax.tick_params(axis="both", labelsize=10.5)
             plotted = False
             for method in methods:
                 seeded_runs = method_runs.get(method, [])
@@ -416,13 +416,13 @@ def plot_school_comparison(
                 plotted = True
             if not plotted:
                 ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                        transform=ax.transAxes, fontsize=8, color="grey")
+                        transform=ax.transAxes, fontsize=12, color="grey")
             if r_idx == 0:
-                ax.set_title(_SHORT_CURVE_LABELS.get(spec.key, spec.label), fontsize=8)
+                ax.set_title(_SHORT_CURVE_LABELS.get(spec.key, spec.label), fontsize=12)
             if r_idx == n_rows - 1:
-                ax.set_xlabel(axis_label, fontsize=8)
+                ax.set_xlabel(axis_label, fontsize=12)
             if c_idx == 0:
-                ax.set_ylabel(problem, fontsize=8)
+                ax.set_ylabel(problem, fontsize=12)
 
         # Pre-compute each method's own product curve (own x-values -- see
         # _per_method_product_curves; no cross-method truncation/alignment).
@@ -435,7 +435,7 @@ def plot_school_comparison(
         # needed since it's N independent lines.
         ax = axes[r_idx][-2]
         ax.grid(True, alpha=0.25)
-        ax.tick_params(axis="both", labelsize=7)
+        ax.tick_params(axis="both", labelsize=10.5)
         plotted = False
         for method in sorted(method_med.keys()):
             style = method_styles[method]
@@ -452,17 +452,17 @@ def plot_school_comparison(
             plotted = True
         if not plotted:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8, color="grey")
+                    transform=ax.transAxes, fontsize=12, color="grey")
         if r_idx == 0:
-            ax.set_title("Product\n(raw, higher is better)", fontsize=8)
+            ax.set_title("Product\n(raw, higher is better)", fontsize=12)
         if r_idx == n_rows - 1:
-            ax.set_xlabel(axis_label, fontsize=8)
+            ax.set_xlabel(axis_label, fontsize=12)
 
         # Rank column (1 = best) — aligned across methods on the union-of-
         # x-values grid via forward-fill (see _rank_curves_on_union_grid).
         ax = axes[r_idx][-1]
         ax.grid(True, axis="y", alpha=0.25)
-        ax.tick_params(axis="both", labelsize=7)
+        ax.tick_params(axis="both", labelsize=10.5)
         plotted = False
         if method_med:
             grid, rank_curves = _rank_curves_on_union_grid(method_x, method_med)
@@ -479,11 +479,11 @@ def plot_school_comparison(
             ax.set_yticks(list(range(1, n_ranked + 1)))
         if not plotted:
             ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
-                    transform=ax.transAxes, fontsize=8, color="grey")
+                    transform=ax.transAxes, fontsize=12, color="grey")
         if r_idx == 0:
-            ax.set_title("Product rank\n(1 = best)", fontsize=8)
+            ax.set_title("Product rank\n(1 = best)", fontsize=12)
         if r_idx == n_rows - 1:
-            ax.set_xlabel(axis_label, fontsize=8)
+            ax.set_xlabel(axis_label, fontsize=12)
 
     # Shared legend drawn once below all subplots
     handles_seen: dict[str, object] = {}
@@ -495,7 +495,7 @@ def plot_school_comparison(
         fig.legend(
             list(handles_seen.values()), list(handles_seen.keys()),
             loc="lower center", ncol=min(len(methods), 6),
-            fontsize=8, bbox_to_anchor=(0.5, 0.0),
+            fontsize=12, bbox_to_anchor=(0.5, 0.0),
         )
         fig.tight_layout(rect=(0, 0.06, 1, 1))
     else:

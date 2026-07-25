@@ -40,9 +40,10 @@ own difficulty levels as natural rows -- exactly the
 builds for other reports. Mirroring :mod:`itcas.reporting.ndig_comparison`'s
 layout (one PDF per row, not one combined grid), this module writes **one
 single-row PDF per selected difficulty level** (``ff_comparison_pN_00_vs_
-evaluations.pdf``) plus two standalone cross-row summary figures -- an
-average-rank figure and a relative-AUC ("relative ranking") figure, see
-below -- instead of a single combined grid with an appended bottom row.
+evaluations.pdf``) plus three standalone cross-row summary figures -- an
+average-rank boxplot figure, a relative-AUC ("relative ranking") boxplot
+figure, and a relative-AUC-by-difficulty line+band figure, see below --
+instead of a single combined grid with an appended bottom row.
 
 The plotted rows are a **curated subset and order**, not all ten: only
 ``_SELECTED_LEVELS`` (currently levels 2, 9, 3, 5, 6, 4, in that exact order)
@@ -51,10 +52,11 @@ Each row's PDF drops the trailing **product-rank column**
 (``include_product_rank_column=False``, exactly as before): just the metric
 columns plus the raw-product column. No figure in this module ever renders a
 ``suptitle`` -- ``plot_group_grid`` never renders one regardless of what's
-passed, and the two standalone summary figures (:func:`itcas.reporting.summary._plot_avg_rank_figure`
-/ :func:`itcas.reporting.summary._plot_relative_auc_figure`) only ever draw
-per-column titles (the metric name, plus a ``↑``/``↓`` arrow where the
-column has a direction). Method names in the legend and in every summary
+passed, and the three standalone summary figures (:func:`itcas.reporting.summary._plot_avg_rank_box_figure`
+/ :func:`itcas.reporting.summary._plot_relative_auc_box_figure` /
+:func:`itcas.reporting.summary._plot_relative_auc_by_difficulty_figure`) only
+ever draw per-column titles (the metric name, plus a ``↑``/``↓`` arrow where
+the column has a direction). Method names in the legend and in every summary
 figure are shown via their short display labels from
 :mod:`itcas.reporting.method_labels` instead of their real (long) method
 names.
@@ -75,53 +77,92 @@ all ten difficulty levels.
 
 **Average-rank figure.** A standalone PDF (``ff_comparison_avg_rank_vs_
 evaluations.pdf``) via :mod:`itcas.reporting.ranking`
-(:func:`~itcas.reporting.ranking.average_ranks_over_rows`) and
-:func:`itcas.reporting.summary._plot_avg_rank_figure`, which are both
+(:func:`~itcas.reporting.ranking.rank_lists_over_rows`) and
+:func:`itcas.reporting.summary._plot_avg_rank_box_figure`, which are both
 deliberately row-agnostic so they work unchanged whether a "row" is a
 difficulty level (as here) or, in some future report, a problem at a fixed
 difficulty. Per the user's framing: for each metric, on each of the *plotted*
-FF difficulty levels (the six selected above, not all ten -- the average
+FF difficulty levels (the six selected above, not all ten -- the figure
 should reflect what's actually shown), compute the area under that metric's
 curve for every run, average those areas within each method (across its
 seeds present at that difficulty), then rank the six methods against each
 other by that mean area (tie-aware, rank 1 = best; direction follows the
 metric's ``higher_is_better``, so a smaller mean area is rank 1 for FCFD).
-Averaging those per-difficulty ranks across the six plotted levels gives each
-method's final average rank per metric, drawn as a horizontal bar chart (one
-bar per method, shortest = best) under each metric column. The same pipeline
-runs once more for the raw point-wise **product** of the metrics (always
-higher-is-better by construction), drawn under the Product column the same
-way.
+That gives each method one rank per plotted level; instead of collapsing
+those six ranks straight to a mean, this figure draws a horizontal **boxplot**
+per method (one box per method, shown lowest/best-median first) summarizing
+the method's rank *distribution* across the six plotted levels, so a method
+that is consistently mid-pack looks different from one that's either great or
+terrible depending on the level even though both could average to the same
+rank. The same pipeline runs once more for the raw point-wise **product** of
+the metrics (always higher-is-better by construction), drawn under the
+Product column the same way.
 
 **Relative-ranking (relative-AUC) figure.** A second standalone PDF
 (``ff_comparison_relative_auc_vs_evaluations.pdf``) via
-:func:`itcas.reporting.ranking.relative_auc_ratios_over_rows` and
-:func:`itcas.reporting.summary._plot_relative_auc_figure`, over the same six
-plotted levels. Instead of a rank, each column reports every (method, seed)
-AUC divided by the best per-seed AUC seen anywhere in that difficulty level
-(any method, any seed), averaged over seeds then over the six levels -- a
-ratio of 1.0 (dashed guide line) means "matched the best seed-level AUC seen
-anywhere at that difficulty"; away from 1.0 moves in that column's *worse*
-direction (below 1 for a higher-is-better column, above 1 for FCFD, the one
-lower-is-better metric).
+:func:`itcas.reporting.ranking.relative_auc_ratio_lists_over_rows` and
+:func:`itcas.reporting.summary._plot_relative_auc_box_figure`, over the same
+six plotted levels. Instead of a rank, each column reports every (method,
+seed) AUC divided by the best per-seed AUC seen anywhere in that difficulty
+level (any method, any seed), averaged over seeds to get one ratio per
+(level, method) -- a ratio of 1.0 (dashed guide line) means "matched the best
+seed-level AUC seen anywhere at that difficulty"; away from 1.0 moves in that
+column's *worse* direction (below 1 for a higher-is-better column, above 1
+for FCFD, the one lower-is-better metric). As with the average-rank figure
+above, those six per-level ratios are drawn as a **boxplot** per method
+(spread across the six plotted levels) rather than collapsed to a single
+averaged bar.
 
 **Relative-ranking-by-difficulty figure.** A third standalone PDF
-(``ff_comparison_relative_auc_by_difficulty.pdf``) via the same
-:func:`itcas.reporting.ranking.relative_auc_ratios_over_rows` and a new
-sibling of the figure above,
+(``ff_comparison_relative_auc_by_difficulty.pdf``) via
+:func:`itcas.reporting.ranking.relative_auc_seed_ratios_for_row` (the raw
+per-seed ratios, one call per level) and a sibling of the figure above,
 :func:`itcas.reporting.summary._plot_relative_auc_by_difficulty_figure`. The
-bar chart above collapses the six *plotted* difficulty levels into one
-averaged ratio per method per column; this figure instead draws one line per
-method per column, plotted across difficulty level on the x-axis, so a
-method's trend as the problem gets harder/easier stays visible -- and, since
-there is no averaging to restrict to a curated subset for, this one plots
-**all ten** FF difficulty levels (sorted ascending by level number, i.e.
-hardest to easiest), not just the six plotted elsewhere in this module. Each
-level's ratio comes from its own single-level call to
-``relative_auc_ratios_over_rows`` (no cross-level averaging); x-tick labels
-are the bare level number (``"2"``, ``"9"``, ...), not the verbose
-``#initials``/threshold row labels used by the grid PDFs. All six methods'
-lines share one legend for the whole figure rather than per-panel labels.
+boxplot above collapses the six *plotted* difficulty levels into one
+per-level-averaged distribution per method per column; this figure instead
+draws one line per method per column, plotted across difficulty level on the
+x-axis, so a method's trend as the problem gets harder/easier stays visible
+-- each line point is that level's mean ratio across seeds, exactly as the
+boxplot above averages within a level. This figure uses the **same curated
+six-level, reordered** ``_SELECTED_LEVELS`` subset (in that same order) as
+the grid PDFs and the two boxplot figures above -- not all ten FF difficulty
+levels -- so every figure in this module is consistent about which levels it
+shows. Unlike the boxplot, the *within-level* seed spread is not thrown away
+either: each line is wrapped in a shaded band spanning the 25th-75th
+percentile (interquartile range) of that level's own per-seed ratios, so both
+the across-level trend (the line) and the within-level seed spread (the
+band) are visible at once. Each level's ratio list comes from its own
+single-level call to ``relative_auc_seed_ratios_for_row`` (no cross-level
+averaging); x-tick labels are the level's plain 1-based position in the
+curated order (``"1"``..``"6"``), not the underlying FF level number and not
+the verbose ``#initials``/threshold row labels used by the grid PDFs. All six
+methods' lines share one legend for the whole figure rather than per-panel
+labels.
+
+**Normalized average curve figure.** A fourth standalone PDF
+(``ff_comparison_normalized_avg_curve_vs_pct_budget.pdf``) via
+:func:`itcas.reporting.summary.normalized_avg_curve_figure_over_rows`, a
+different kind of cross-row aggregate from the three above: instead of
+collapsing each level's curve to one scalar (an AUC, a rank, a ratio) before
+combining across levels, this one keeps each level's full iteration-by-
+iteration curve and averages those curves directly, so a reader can see
+*where in the search* (early vs. late) a method's advantage shows up rather
+than only its endpoint summary. Two problems specific to averaging raw
+curves across rows -- which the three scalar-based figures above never have
+to solve -- are handled by that function: the x-axis is **% of each run's
+own evaluation budget** (``run.config["budget"]``, via
+``summary._run_budget``) rather than raw evaluation count (a no-op rescale
+here, since every FF difficulty level already shares one fixed budget --
+this matters for the synthetic pipeline's mismatched 100-/200-budget
+problems, not for FF, but the same function serves both); and each level's
+curves are normalized by that level's own best-ever value anywhere (any
+method, any seed, any timestep) before averaging, the same ratio-to-row-best
+convention the relative-AUC figures above already use, just applied
+point-wise to the whole curve instead of once to its AUC. One line + shaded
+IQR band per method per column, spread shown **across the same curated
+six-level** ``_SELECTED_LEVELS`` subset (in that same order) used by every
+other figure in this module, mirroring the by-difficulty figure's own
+across-level band (not an across-seed one).
 
 **Statistics ("dominance of NDIG").** Per FF difficulty level -- all ten,
 independent of the plot's six-level subset above: a
@@ -162,10 +203,11 @@ from .stats import StatsReport, _fmt, _sig_marker, report_to_json, run_stats
 from .summary import (
     CurveCache,
     _metrics_present_in_rows,
-    _plot_avg_rank_figure,
+    _plot_avg_rank_box_figure,
+    _plot_relative_auc_box_figure,
     _plot_relative_auc_by_difficulty_figure,
-    _plot_relative_auc_figure,
-    _precompute,
+    _precompute_cached,
+    normalized_avg_curve_figure_over_rows,
 )
 
 _PROBLEM = "spacecraft_formation_flying_a1"
@@ -277,49 +319,42 @@ def _level_row_label(
 def summarize_plots(
     input_dir: str | Path,
     output_dir: str | Path,
+    auc_cache_dir: str | Path | None = None,
 ) -> tuple[list[str], list[RunSeries], CurveCache]:
-    """Produce one single-row PDF per selected difficulty level plus the two
+    """Produce one single-row PDF per selected difficulty level plus the three
     standalone summary figures (see module docstring). Returns ``(paths, runs, cache)``.
 
     The latter two are returned so the stats step below can reuse the same
     discovered runs / precomputed metric curves instead of re-reading logs.
+
+    When ``auc_cache_dir`` is given (see :func:`summarize_ff_comparison`), the
+    same directory holds two side-by-side caches: the raw per-iteration
+    curves (``<problem>_curve_cache.json``, via ``summary._precompute_cached``
+    -- this is the one that matters, since ``compute_metric``/``_precompute``,
+    not the trapezoidal integration, is the actual bottleneck), and the
+    per-seed AUCs (``<problem>_auc_cache.json``, via
+    :mod:`itcas.reporting.auc_cache`) fed into every ``ranking.*`` call below
+    so it can skip recomputing ``summary._curve_area`` for any
+    ``(run, axis, metric)`` already on disk. Both caches are merged back with
+    anything newly computed before returning. This never changes any figure's
+    content -- a cached curve/AUC is numerically identical to what
+    ``compute_metric``/``_curve_area`` would compute fresh (see
+    ``summary._precompute_cached`` / ``ranking._lookup_or_compute_auc``).
     """
+    from .auc_cache import compute_auc_table, load_auc_cache_for_problem, save_auc_cache
+
     input_path = Path(input_dir)
     out_dir = Path(output_dir)
 
     runs_by_problem = _collect_family_runs(input_path, [_PROBLEM], list(METHODS))
     runs = runs_by_problem.get(_PROBLEM, [])
-    cache = _precompute(runs) if runs else {}
+    cache = _precompute_cached(runs, auc_cache_dir, _PROBLEM) if runs else {}
+    existing_auc_cache = load_auc_cache_for_problem(auc_cache_dir, _PROBLEM, runs=runs) if (runs and auc_cache_dir is not None) else {}
 
     paths: list[str] = []
     all_rows = _rows_by_difficulty(runs, cache)
     if not all_rows:
         return paths, runs, cache
-
-    # Per-level (not the curated/reordered _SELECTED_LEVELS subset, and not
-    # averaged across levels) relative-AUC ratios feeding the by-difficulty
-    # line plot below -- see module docstring's "Relative-ranking-by-
-    # difficulty figure" section. Uses every difficulty level found in
-    # `runs` (all ten), unlike the six curated/reordered levels the grid PDFs
-    # and the other two standalone summary figures use. `all_rows` itself is
-    # only *string*-sorted by tag ("p10_00" sorts before "p1_00"
-    # lexicographically), so re-sort by the parsed integer level here to get
-    # true ascending-by-level ("hardest -> easiest" per this module's
-    # convention) order on the x-axis. Each level's ratios come from its own
-    # single-row `relative_auc_ratios_over_rows` call, so there is no
-    # cross-level averaging -- the whole point is to keep every level's own
-    # value visible.
-    all_rows_by_level = sorted(
-        all_rows, key=lambda row: int(row[0].removeprefix("p").split("_")[0])
-    )
-    relative_auc_by_level: list[tuple[str, dict[str, dict[str, float]]]] = []
-    for diff_label, row_runs, row_cache in all_rows_by_level:
-        level_row = ranking.relative_auc_ratios_over_rows(
-            [(diff_label, row_runs, row_cache)], list(METHODS), _AXIS
-        )
-        tick_label = diff_label.removeprefix("p").split("_")[0].lstrip("0") or "0"
-        relative_auc_by_level.append((tick_label, level_row))
-    metrics_present_all = _metrics_present_in_rows(all_rows)
 
     # Select + reorder + relabel to _SELECTED_LEVELS (see module docstring's
     # "Layout" section) -- row content (runs/cache) is untouched, only which
@@ -357,38 +392,72 @@ def summarize_plots(
             paths.append(str(ok))
 
     # Standalone average-rank + relative-AUC ("relative ranking") figures
-    # across the plotted levels (see module docstring).
+    # across the plotted levels (see module docstring) -- both boxplots, one
+    # box per method showing that method's spread across the plotted levels
+    # rather than just its mean.
     metrics_present = _metrics_present_in_rows(rows)
 
-    avg_rank_row = ranking.average_ranks_over_rows(rows, list(METHODS), _AXIS)
+    avg_rank_lists = ranking.rank_lists_over_rows(
+        rows, list(METHODS), _AXIS, auc_cache=existing_auc_cache
+    )
     avg_rank_path = out_dir / "ff_comparison_avg_rank_vs_evaluations.pdf"
-    ok = _plot_avg_rank_figure(
-        avg_rank_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
+    ok = _plot_avg_rank_box_figure(
+        avg_rank_lists, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
         avg_rank_path, method_labels=METHOD_ABBREVIATIONS,
     )
     if ok is not None:
         paths.append(str(ok))
 
-    relative_auc_row = ranking.relative_auc_ratios_over_rows(rows, list(METHODS), _AXIS)
+    relative_auc_lists = ranking.relative_auc_ratio_lists_over_rows(
+        rows, list(METHODS), _AXIS, auc_cache=existing_auc_cache
+    )
     relative_auc_path = out_dir / "ff_comparison_relative_auc_vs_evaluations.pdf"
-    ok = _plot_relative_auc_figure(
-        relative_auc_row, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
+    ok = _plot_relative_auc_box_figure(
+        relative_auc_lists, list(METHODS), _METHOD_STYLES, metrics_present, len(rows),
         relative_auc_path, method_labels=METHOD_ABBREVIATIONS,
     )
     if ok is not None:
         paths.append(str(ok))
 
-    # Line-plot sibling of the relative-AUC bar chart above: one line per
-    # method across every one of the ten FF difficulty levels (not the six
-    # curated/reordered/averaged-away ones the bar chart uses) -- see module
-    # docstring.
+    # Normalized-average-curve figure: one line + shaded IQR band per method
+    # per column, spread across the same curated six-level, reordered
+    # `_SELECTED_LEVELS` subset used by every other figure in this module --
+    # see module docstring's "Normalized average curve figure" section.
+    normalized_curve_path = out_dir / "ff_comparison_normalized_avg_curve_vs_pct_budget.pdf"
+    ok = normalized_avg_curve_figure_over_rows(
+        rows, list(METHODS), _METHOD_STYLES, metrics_present, normalized_curve_path,
+        method_labels=METHOD_ABBREVIATIONS,
+    )
+    if ok is not None:
+        paths.append(str(ok))
+
+    # Line-plot sibling of the relative-AUC boxplot above: one line + shaded
+    # IQR band per method across the same curated six-level, reordered
+    # `_SELECTED_LEVELS` subset (in that same order) as the grid PDFs and the
+    # two boxplot figures above -- see module docstring. Each level's ratio
+    # list comes from its own single-row `relative_auc_seed_ratios_for_row`
+    # call (no cross-level averaging, and no within-level seed averaging
+    # either -- that happens only inside `_draw_metric_line_panel` when it
+    # plots the mean point / IQR band); x-tick labels are the level's plain
+    # 1-based position in the curated order ("1".."6"), not the underlying FF
+    # level number.
+    relative_auc_by_level: list[tuple[str, dict[str, dict[str, list[float]]]]] = []
+    for i, row in enumerate(rows, start=1):
+        level_row = ranking.relative_auc_seed_ratios_for_row(
+            row, list(METHODS), _AXIS, auc_cache=existing_auc_cache,
+        )
+        relative_auc_by_level.append((str(i), level_row))
+
     by_difficulty_path = out_dir / "ff_comparison_relative_auc_by_difficulty.pdf"
     ok = _plot_relative_auc_by_difficulty_figure(
-        relative_auc_by_level, list(METHODS), _METHOD_STYLES, metrics_present_all,
+        relative_auc_by_level, list(METHODS), _METHOD_STYLES, metrics_present,
         by_difficulty_path, method_labels=METHOD_ABBREVIATIONS,
     )
     if ok is not None:
         paths.append(str(ok))
+
+    if auc_cache_dir is not None and runs:
+        save_auc_cache(auc_cache_dir, _PROBLEM, runs, compute_auc_table(runs, cache))
 
     return paths, runs, cache
 
@@ -523,10 +592,20 @@ def summarize_ff_comparison(
     input_dir: str | Path,
     output_dir: str | Path | None = None,
     alpha: float = 0.05,
+    auc_cache_dir: str | Path | None = None,
 ) -> list[str]:
+    """See module docstring. ``auc_cache_dir`` defaults to
+    ``Path(input_dir).parent / "auc_cache"`` when ``None`` -- a stable
+    location shared across every report/problem regardless of
+    ``output_dir`` (which varies per run, including throwaway smoke-test
+    dirs) -- see :mod:`itcas.reporting.auc_cache`.
+    """
     out_dir = Path(output_dir) if output_dir is not None else Path(_DEFAULT_OUTPUT_DIR)
+    resolved_auc_cache_dir = (
+        Path(auc_cache_dir) if auc_cache_dir is not None else Path(input_dir).parent / "auc_cache"
+    )
 
-    paths, runs, cache = summarize_plots(input_dir, out_dir)
+    paths, runs, cache = summarize_plots(input_dir, out_dir, auc_cache_dir=resolved_auc_cache_dir)
 
     report = build_stats_report(runs, cache, alpha=alpha)
     json_p, md_p = write_stats_report(report, out_dir)
@@ -540,6 +619,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--input-dir", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default=_DEFAULT_OUTPUT_DIR)
     parser.add_argument(
+        "--auc-cache-dir", type=str, default=None, dest="auc_cache_dir",
+        help=(
+            "Directory for the disk-backed per-seed metric-AUC cache (see "
+            "itcas.reporting.auc_cache). Defaults to <input-dir's parent>/auc_cache."
+        ),
+    )
+    parser.add_argument(
         "--alpha", type=float, default=0.05,
         help="Significance level for the Friedman gate and Holm-Bonferroni corrected Wilcoxon tests.",
     )
@@ -549,6 +635,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.input_dir,
         output_dir=args.output_dir,
         alpha=args.alpha,
+        auc_cache_dir=args.auc_cache_dir,
     )
     for p in paths:
         print(p)

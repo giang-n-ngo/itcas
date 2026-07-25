@@ -37,16 +37,16 @@
         "eps_archive": 1000.0
       },
       "0.01": {
-        "eps_archive": 0.381352
+        "eps_archive": 0.515711
       },
       "0.05": {
-        "eps_archive": 0.357773
+        "eps_archive": 0.460927
       },
       "0.1": {
-        "eps_archive": 0.362425
+        "eps_archive": 0.477341
       },
       "0.2": {
-        "eps_archive": 0.389323
+        "eps_archive": 0.515723
       }
     },
     "alpine_12d": {
@@ -58,16 +58,16 @@
         "eps_archive": 10.0
       },
       "0.01": {
-        "eps_archive": 0.461991
+        "eps_archive": 0.745648
       },
       "0.05": {
-        "eps_archive": 0.446975
+        "eps_archive": 0.699638
       },
       "0.1": {
-        "eps_archive": 0.428795
+        "eps_archive": 0.62796
       },
       "0.2": {
-        "eps_archive": 0.425286
+        "eps_archive": 0.609022
       }
     },
     "dixon_price_10d": {
@@ -100,16 +100,16 @@
         "eps_archive": 0.05
       },
       "0.01": {
-        "eps_archive": 0.264396
+        "eps_archive": 0.45199
       },
       "0.05": {
-        "eps_archive": 0.262833
+        "eps_archive": 0.447898
       },
       "0.1": {
-        "eps_archive": 0.255705
+        "eps_archive": 0.454344
       },
       "0.2": {
-        "eps_archive": 0.253716
+        "eps_archive": 0.445124
       }
     },
     "dtlz1_12d": {
@@ -121,16 +121,16 @@
         "eps_archive": 20.0
       },
       "0.01": {
-        "eps_archive": 0.211988
+        "eps_archive": 0.387056
       },
       "0.05": {
-        "eps_archive": 0.296827
+        "eps_archive": 0.586623
       },
       "0.1": {
-        "eps_archive": 0.33795
+        "eps_archive": 0.589211
       },
       "0.2": {
-        "eps_archive": 0.367541
+        "eps_archive": 0.529426
       }
     },
     "dtlz2_6d": {
@@ -142,16 +142,16 @@
         "eps_archive": 0.1
       },
       "0.01": {
-        "eps_archive": 0.0711126
+        "eps_archive": 0.0747426
       },
       "0.05": {
-        "eps_archive": 0.0944058
+        "eps_archive": 0.0916923
       },
       "0.1": {
-        "eps_archive": 0.0990891
+        "eps_archive": 0.101426
       },
       "0.2": {
-        "eps_archive": 0.114522
+        "eps_archive": 0.122199
       }
     },
     "dtlz3_8d": {
@@ -163,16 +163,16 @@
         "eps_archive": 20.0
       },
       "0.01": {
-        "eps_archive": 0.0994995
+        "eps_archive": 0.475657
       },
       "0.05": {
-        "eps_archive": 0.22011
+        "eps_archive": 0.538117
       },
       "0.1": {
-        "eps_archive": 0.271341
+        "eps_archive": 0.571645
       },
       "0.2": {
-        "eps_archive": 0.349597
+        "eps_archive": 0.578601
       }
     },
     "dtlz4_12d": {
@@ -226,16 +226,16 @@
         "eps_archive": 0.1
       },
       "0.01": {
-        "eps_archive": 0.255716
+        "eps_archive": 0.400225
       },
       "0.05": {
-        "eps_archive": 0.237711
+        "eps_archive": 0.29579
       },
       "0.1": {
-        "eps_archive": 0.246805
+        "eps_archive": 0.282686
       },
       "0.2": {
-        "eps_archive": 0.238549
+        "eps_archive": 0.292317
       }
     },
     "ellipsoid_rastrigin_20d": {
@@ -247,16 +247,16 @@
         "eps_archive": 0.01
       },
       "0.01": {
-        "eps_archive": 0.323245
+        "eps_archive": 0.53776
       },
       "0.05": {
-        "eps_archive": 0.306811
+        "eps_archive": 0.435461
       },
       "0.1": {
-        "eps_archive": 0.296602
+        "eps_archive": 0.414324
       },
       "0.2": {
-        "eps_archive": 0.320312
+        "eps_archive": 0.419896
       }
     },
     "griewank_16d": {
@@ -268,16 +268,16 @@
         "eps_archive": 0.1
       },
       "0.01": {
-        "eps_archive": 0.0150805
+        "eps_archive": 0.0152683
       },
       "0.05": {
-        "eps_archive": 0.0174109
+        "eps_archive": 0.0157278
       },
       "0.1": {
-        "eps_archive": 0.0185175
+        "eps_archive": 0.0156783
       },
       "0.2": {
-        "eps_archive": 0.0200073
+        "eps_archive": 0.0172847
       }
     },
     "griewank_vlmop2_16d": {
@@ -289,16 +289,16 @@
         "eps_archive": 0.05
       },
       "0.01": {
-        "eps_archive": 0.00235878
+        "eps_archive": 0.00820774
       },
       "0.05": {
-        "eps_archive": 0.000606344
+        "eps_archive": 0.00280731
       },
       "0.1": {
-        "eps_archive": 0.000510117
+        "eps_archive": 0.00173108
       },
       "0.2": {
-        "eps_archive": 0.000470188
+        "eps_archive": 0.000807684
       }
     },
     "heterogeneous_quadrants_6d": {
@@ -310,16 +310,16 @@
         "eps_archive": 10.0
       },
       "0.01": {
-        "eps_archive": 0.423307
+        "eps_archive": 0.624812
       },
       "0.05": {
-        "eps_archive": 0.484761
+        "eps_archive": 0.568708
       },
       "0.1": {
-        "eps_archive": 0.491638
+        "eps_archive": 0.541807
       },
       "0.2": {
-        "eps_archive": 0.501631
+        "eps_archive": 0.530807
       }
     },
     "levy_16d": {
@@ -331,16 +331,16 @@
         "eps_archive": 0.1
       },
       "0.01": {
-        "eps_archive": 0.39821
+        "eps_archive": 0.640339
       },
       "0.05": {
-        "eps_archive": 0.396179
+        "eps_archive": 0.517673
       },
       "0.1": {
-        "eps_archive": 0.394427
+        "eps_archive": 0.464898
       },
       "0.2": {
-        "eps_archive": 0.390382
+        "eps_archive": 0.470338
       }
     },
     "multimodal_trap_20d": {
@@ -352,16 +352,16 @@
         "eps_archive": 0.1
       },
       "0.01": {
-        "eps_archive": 0.393702
+        "eps_archive": 0.4206
       },
       "0.05": {
-        "eps_archive": 0.384665
+        "eps_archive": 0.382724
       },
       "0.1": {
-        "eps_archive": 0.377611
+        "eps_archive": 0.34095
       },
       "0.2": {
-        "eps_archive": 0.36167
+        "eps_archive": 0.298346
       }
     },
     "rastrigin_griewank_sphere_20d": {
@@ -373,16 +373,16 @@
         "eps_archive": 0.01
       },
       "0.01": {
-        "eps_archive": 0.264296
+        "eps_archive": 0.365538
       },
       "0.05": {
-        "eps_archive": 0.270225
+        "eps_archive": 0.30162
       },
       "0.1": {
-        "eps_archive": 0.269394
+        "eps_archive": 0.266044
       },
       "0.2": {
-        "eps_archive": 0.281878
+        "eps_archive": 0.247434
       }
     },
     "rosenbrock_sphere_6d": {
@@ -394,16 +394,16 @@
         "eps_archive": 0.02
       },
       "0.01": {
-        "eps_archive": 0.232284
+        "eps_archive": 0.265548
       },
       "0.05": {
-        "eps_archive": 0.247575
+        "eps_archive": 0.244085
       },
       "0.1": {
-        "eps_archive": 0.242419
+        "eps_archive": 0.254917
       },
       "0.2": {
-        "eps_archive": 0.241096
+        "eps_archive": 0.279606
       }
     },
     "schwefel_styblinski_sphere_20d": {
@@ -415,16 +415,16 @@
         "eps_archive": 0.01
       },
       "0.01": {
-        "eps_archive": 0.64508
+        "eps_archive": 1.05045
       },
       "0.05": {
-        "eps_archive": 0.570398
+        "eps_archive": 0.814235
       },
       "0.1": {
-        "eps_archive": 0.555711
+        "eps_archive": 0.692192
       },
       "0.2": {
-        "eps_archive": 0.552105
+        "eps_archive": 0.666633
       }
     },
     "spacecraft_formation_flying_a1": {
@@ -438,56 +438,55 @@
       "1": {
         "budget": 60,
         "batch_size": 6,
-        "n_init": 20,
-        "eps_archive": 100.0
+        "n_init": 20
       },
       "2": {
         "budget": 60,
         "batch_size": 6,
         "n_init": 20,
-        "eps_archive": 0.386491
+        "eps_archive": 0.948642
       },
       "3": {
         "budget": 60,
         "batch_size": 6,
         "n_init": 20,
-        "eps_archive": 0.321768
+        "eps_archive": 0.729454
       },
       "4": {
         "budget": 60,
         "batch_size": 6,
         "n_init": 20,
-        "eps_archive": 0.269747
+        "eps_archive": 0.62831
       },
       "5": {
         "budget": 60,
         "batch_size": 6,
         "n_init": 20,
-        "eps_archive": 0.319197
+        "eps_archive": 0.68458
       },
       "6": {
         "budget": 60,
         "batch_size": 6,
         "n_init": 20,
-        "eps_archive": 0.274453
+        "eps_archive": 0.656882
       },
       "7": {
         "budget": 60,
         "batch_size": 6,
         "n_init": 20,
-        "eps_archive": 0.299278
+        "eps_archive": 0.706279
       },
       "8": {
         "budget": 60,
         "batch_size": 6,
         "n_init": 20,
-        "eps_archive": 0.265486
+        "eps_archive": 0.629897
       },
       "10": {
-        "eps_archive": 0.381998
+        "eps_archive": 0.978606
       },
       "9": {
-        "eps_archive": 0.308985
+        "eps_archive": 0.73001
       }
     },
     "sphere2_6d": {
@@ -502,25 +501,25 @@
         "budget": 100,
         "batch_size": 4,
         "n_init": 12,
-        "eps_archive": 0.277887
+        "eps_archive": 0.308871
       },
       "0.1": {
         "budget": 100,
         "batch_size": 4,
         "n_init": 12,
-        "eps_archive": 0.267592
+        "eps_archive": 0.283753
       },
       "0.05": {
         "budget": 100,
         "batch_size": 4,
         "n_init": 12,
-        "eps_archive": 0.262603
+        "eps_archive": 0.285405
       },
       "0.01": {
         "budget": 100,
         "batch_size": 4,
         "n_init": 12,
-        "eps_archive": 0.259706
+        "eps_archive": 0.317637
       }
     },
     "styblinski_tang_6d": {
@@ -532,16 +531,16 @@
         "eps_archive": 0.01
       },
       "0.01": {
-        "eps_archive": 0.278735
+        "eps_archive": 0.593078
       },
       "0.05": {
-        "eps_archive": 0.250681
+        "eps_archive": 0.49506
       },
       "0.1": {
-        "eps_archive": 0.235186
+        "eps_archive": 0.436486
       },
       "0.2": {
-        "eps_archive": 0.196951
+        "eps_archive": 0.363231
       }
     },
     "styblinski_tang_levy_10d": {
@@ -553,16 +552,16 @@
         "eps_archive": 0.05
       },
       "0.01": {
-        "eps_archive": 0.321923
+        "eps_archive": 0.88786
       },
       "0.05": {
-        "eps_archive": 0.290993
+        "eps_archive": 0.550986
       },
       "0.1": {
-        "eps_archive": 0.277387
+        "eps_archive": 0.504655
       },
       "0.2": {
-        "eps_archive": 0.24918
+        "eps_archive": 0.444891
       }
     },
     "vlmop2_6d": {
@@ -574,16 +573,16 @@
         "eps_archive": 0.05
       },
       "0.01": {
-        "eps_archive": 0.0380819
+        "eps_archive": 0.0371274
       },
       "0.05": {
-        "eps_archive": 0.0378437
+        "eps_archive": 0.0360833
       },
       "0.1": {
-        "eps_archive": 0.0329761
+        "eps_archive": 0.0324393
       },
       "0.2": {
-        "eps_archive": 0.0211603
+        "eps_archive": 0.0299554
       }
     },
     "zakharov_ackley_10d": {
@@ -595,16 +594,16 @@
         "eps_archive": 0.05
       },
       "0.01": {
-        "eps_archive": 0.08853
+        "eps_archive": 0.271172
       },
       "0.05": {
-        "eps_archive": 0.0943528
+        "eps_archive": 0.209635
       },
       "0.1": {
-        "eps_archive": 0.0902764
+        "eps_archive": 0.180899
       },
       "0.2": {
-        "eps_archive": 0.0909317
+        "eps_archive": 0.150688
       }
     },
     "zdt3_6d": {
@@ -616,16 +615,16 @@
         "eps_archive": 0.1
       },
       "0.01": {
-        "eps_archive": 0.0578147
+        "eps_archive": 0.0786518
       },
       "0.05": {
-        "eps_archive": 0.0802691
+        "eps_archive": 0.0881542
       },
       "0.1": {
-        "eps_archive": 0.0950653
+        "eps_archive": 0.102239
       },
       "0.2": {
-        "eps_archive": 0.105817
+        "eps_archive": 0.105643
       }
     },
     "casd_llm": {
@@ -634,6 +633,18 @@
         "budget": 250,
         "batch_size": 5,
         "n_init": 20
+      },
+      "1": {
+        "eps_archive": 0.0677271
+      },
+      "2": {
+        "eps_archive": 0.0402907
+      },
+      "3": {
+        "eps_archive": 0.0313763
+      },
+      "4": {
+        "eps_archive": 0.0350698
       }
     }
   }
