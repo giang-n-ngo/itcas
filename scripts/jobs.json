@@ -12,18 +12,29 @@
       ],
     "group": [
       {
-        "_comment": "",
+        "_comment": "Final synthetic benchmarks (every problem in configs/final_problems.json except the two real-world problems, spacecraft_formation_flying_a1/casd_llm): the two new QD-DPP diversity-kernel ablations of the proposed method's batch NDIG acquisition. Both use plain NDIG's quality unchanged and a fixed --quality of 'ndig' baked into the method name (no --quality flag, exactly like c2lse_batch/bes_batch) -- ndig_no_kobj_batch drops k_obj from the L-ensemble (diversity via context alone), ndig_no_kctx_batch drops k_ctx (diversity via the objective-space prediction alone). See itcas/pipeline/loop.py's NDIG_KERNEL_ABLATION / itcas/algorithms/continuous.py's disable_kernel.",
         "methods": [
-          "cr_ndig",
-          "bes_batch",
-          "bes_then_sample_lse10_batch",
-          "bes_then_sample_lse25",
-          "bes_then_sample_lse25_batch"
+          "ndig_no_kobj_batch",
+          "ndig_no_kctx_batch"
         ],
         "problems": [
-          "casd_llm"
+          "all_valley_8d",
+          "alpine_12d",
+          "dtlz1_12d",
+          "dtlz2_6d",
+          "dtlz3_8d",
+          "ellipsoid_rastrigin_20d",
+          "griewank_16d",
+          "heterogeneous_quadrants_6d",
+          "levy_16d",
+          "multimodal_trap_20d",
+          "schwefel_styblinski_sphere_20d",
+          "styblinski_tang_6d",
+          "rastrigin_griewank_sphere_20d",
+          "styblinski_tang_levy_10d",
+          "zdt3_6d"
         ],
-        "difficulties": [1, 2, 3, 4],
+        "difficulties": [0.01, 0.05, 0.1, 0.2],
         "quality": [
         ],
         "seeds": "0-19",
