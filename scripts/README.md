@@ -137,9 +137,13 @@ Operator-owned; they wrap the Python entry points, no science inside:
 |--------|------|---------|
 | `scripts/install_env.sbatch` | GPU job | Build/verify the `itcas` conda env (installs a CUDA-matched torch, runs smoke tests, fails if the GPU is unusable). |
 | `scripts/calibrate.sbatch`   | CPU job | Calibrate thresholds for **one** problem across **all** difficulty levels → `configs/thresholds.json`. |
-| `scripts/submit.sh`          | wrapper | Read the JSON, size the array, submit the sweep. |
-| `scripts/submit_jobs.sbatch` | array   | One array task per job = 1 GPU (`--gpus=1`), `n_concurrent` seeds at a time. |
-| `scripts/run_seedset.sh`     | launcher| Runs one job set: drains pending seeds N-at-a-time, retries, optional email. |
+| `scripts/submit.sh`          | wrapper | **"f" cluster.** Read the JSON, size the array, submit the sweep. |
+| `scripts/submit_jobs.sbatch` | array   | **"f" cluster.** One array task per job = 1 GPU (`--gpus=1`), `n_concurrent` seeds at a time. |
+| `scripts/run_seedset.sh`     | launcher| **"f" cluster.** Runs one job set: drains pending seeds N-at-a-time, retries, optional email. |
+| `scripts/m_submit.sh`        | wrapper | **"m" cluster.** Read the JSON, submit ONE big multi-GPU job (or a small array of them). |
+| `scripts/m_submit_jobs.sbatch` | job (1 or array) | **"m" cluster.** Requests `GPUS_PER_JOB` A100s on one node, hands off to `m_run_pool.sh`. |
+| `scripts/m_run_pool.sh`     | launcher| **"m" cluster.** Spawns one background worker per GPU; each worker claims-and-drains sets until none are left. |
+| `scripts/m_run_seedset.sh`  | launcher| **"m" cluster.** Sibling of `run_seedset.sh`; runs one claimed job set on one GPU. |
 | `scripts/summarize.sbatch`   | CPU job | Render per-problem summary PDFs (`itcas.summarize`) from completed runs. |
 
 All scripts resolve the repo via `SLURM_SUBMIT_DIR` (Slurm copies `.sbatch`
@@ -176,7 +180,19 @@ sbatch scripts/calibrate.sbatch sphere2_6d         # all difficulty levels
 Runs on `--partition=cpu --qos=cpu` (Monte-Carlo sampling, no GPU). Overrides:
 `PERCENTAGES`, `N_SAMPLES`, `SEED`, `OUT`, `CONDA_ENV`.
 
-## 1) Submit the sweep
+## 1) Submit the sweep ("f" cluster: L40S/V100s, one GPU per array task)
+
+> This section covers the **"f" cluster**. For the **"m" cluster** (A100
+> pool, fewer-bigger-jobs convention), see
+> [Alternate: cluster "m" submission](#alternate-cluster-m-submission-fewer-bigger-multi-gpu-jobs)
+> below instead — the two script families are siblings, not interchangeable,
+> and consume the same `scripts/jobs.json`.
+
+Requires `jq` on the login node. `submit.sh` activates `CONDA_ENV` in your
+current shell itself (not just inside the submitted job) so `jq` — installed
+into the env via conda-forge by `install_env.sbatch` — is on `PATH` before it
+parses `jobs.json`; without `CONDA_ENV` set, `jq` must already be on `PATH`
+some other way (system package, module, etc.).
 
 ```bash
 # Preview the array sizing / sbatch command without submitting:
@@ -198,7 +214,7 @@ partition; `squeue -p gpu -p gpu-large` shows who's using what). Override via
 env: `PARTITION` (comma-separated list, or a single partition to pin to one),
 `GPUS` (e.g. `v100:1`), `QOS`, `TIME`, `MAX_GPUS`, `ACCOUNT`, `CONDA_ENV`.
 
-## Logs & monitoring
+## Logs & monitoring ("f" cluster)
 
 Slurm logs: `slurm_logs/<job>-%A_%a.{out,err}`; per-seed console logs:
 `<results_root>/<problem>/<diff>/<method>/*.run.log`.
@@ -208,6 +224,64 @@ squeue --me                          # queue state of your jobs
 sacct -j <jobid> --format=JobID,JobName%20,State,ExitCode,Elapsed,NodeList
 seff <jobid>                         # resource efficiency after completion
 scancel <jobid>                      # cancel a specific job/array task
+```
+
+## Alternate: cluster "m" submission (fewer, bigger multi-GPU jobs)
+
+`scripts/jobs.json` also drives cluster **"m"** (3 A100 nodes, 8 GPUs each) —
+but via a different, sibling script family, not `submit.sh`:
+`m_submit.sh` → `m_submit_jobs.sbatch` → `m_run_pool.sh` → `m_run_seedset.sh`.
+Same job spec, same per-set launcher logic (seed skip/resume, `--quality`
+handling, sizing pulled from `configs/experiments.json`), but the opposite
+submission shape — do not mix the two families for the same sweep:
+
+| | "f" cluster (`submit.sh`) | "m" cluster (`m_submit.sh`) |
+|---|---|---|
+| Submission shape | one Slurm **array**; each task = one set = 1 GPU | **one big job** (or a small array of big jobs), each holding `GPUS_PER_JOB` GPUs on a single node |
+| Work assignment | the array index selects the set | background workers (one per GPU) atomically claim-and-drain sets from a shared lock directory until none are left, so all GPUs stay busy regardless of how sets outnumber GPUs |
+| Sizing knob | `MAX_GPUS` (array throttle) | `GPUS_PER_JOB` x `NUM_BIG_JOBS` |
+| GPU pinning | `--partition=gpu,gpu-large` (A100 or H100/H200, whichever frees up first) | `--constraint=gpu-a100` within `--partition=gpu` (A100 only — `gpu-large` H100/H200 nodes are deliberately excluded) |
+
+```bash
+# Requires jq on PATH (installed into the conda env by install_env.sbatch;
+# activate that env first, or set CONDA_ENV below so the script activates it
+# for you before its own jq calls run).
+
+# Preview the sbatch command / GPU sizing without submitting:
+DRY_RUN=1 CONDA_ENV=itcas scripts/m_submit.sh scripts/jobs.json
+
+# Submit (defaults: GPUS_PER_JOB=4 i.e. half an A100 node, NUM_BIG_JOBS=1,
+# partition=gpu, qos=batch-short, time=3-00:00:00):
+CONDA_ENV=itcas scripts/m_submit.sh scripts/jobs.json
+
+# Bump concurrency for a quiet-cluster burst run, or run two big jobs in parallel:
+GPUS_PER_JOB=8 CONDA_ENV=itcas scripts/m_submit.sh scripts/jobs.json
+GPUS_PER_JOB=4 NUM_BIG_JOBS=2 CONDA_ENV=itcas scripts/m_submit.sh scripts/jobs.json
+```
+
+`m_submit.sh` snapshots `scripts/jobs.json` into `slurm_logs/job_specs/` before
+submitting (aliased to the resulting job ID), so in-flight/pending workers are
+immune to later edits of the live file. Per-GPU CPU/mem budget matches the "f"
+cluster's per-GPU allocation (16 cpus, 32G mem), scaled by `GPUS_PER_JOB`; size
+`TIME` for `ceil(num_sets / GPUS_PER_JOB)` waves of ~3-5h each (one set's worth
+of seeds), using `QOS=batch-long` (<=10d) for very large sweeps. Other
+overrides: `PARTITION`, `QOS`, `TIME`, `ACCOUNT`, `CONDA_ENV`/`CONDA_MODULE`.
+
+### Logs & monitoring ("m" cluster)
+
+Job-level logs: `slurm_logs/itcas_gpu_m_<jobid>.{out,err}` (one file per big
+job/array task, shared by all `GPUS_PER_JOB` workers inside it); per-seed
+console logs are the same layout as the "f" cluster:
+`<results_root>/<problem>/<diff>/<method>/*.run.log`. Claim state (which
+worker owns which set) lives under `slurm_logs/m_claims/<jobid>/` — safe to
+inspect but not to edit; a fresh submission re-derives pending work from
+results on disk regardless of stale claims from a prior run.
+
+```bash
+squeue --me                          # queue state of your job(s)
+sacct -j <jobid> --format=JobID,JobName%20,State,ExitCode,Elapsed,NodeList
+seff <jobid>                         # resource efficiency after completion
+scancel <jobid>                      # cancel the big job (all its GPU workers)
 ```
 
 ## 2) Summary visualization (CPU job)

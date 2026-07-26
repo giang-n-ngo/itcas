@@ -18,6 +18,8 @@
 # What it does (non-interactive, idempotent):
 #   1. module load Anaconda3
 #   2. create conda env CONDA_ENV (default 'itcas', Python 3.10) if missing
+#   2b. install jq via conda-forge (needed by submit.sh/m_submit.sh to parse
+#       scripts/jobs.json on the login node; not a pip package)
 #   3. (optional) install a CUDA-specific torch wheel from TORCH_INDEX_URL
 #   4. pip install -r requirements.txt
 #   5. verify imports + report torch / CUDA availability + run smoke tests
@@ -109,6 +111,14 @@ echo "[install] active python: $(command -v python)  ($(python --version 2>&1))"
 echo "[install] site dirs:"; python -c "import site,sys; print('  prefix=',sys.prefix); print('  ENABLE_USER_SITE=',site.ENABLE_USER_SITE)"
 
 python -m pip install --upgrade pip
+
+# --- 2b. Install jq (system tool, not a pip package) -----------------------
+# Required by submit.sh/m_submit.sh (and their sibling launcher scripts) to
+# parse scripts/jobs.json on the login node. Installed via conda-forge into
+# this same env so 'conda activate itcas' puts it on PATH without needing
+# root / a cluster module.
+command -v jq >/dev/null 2>&1 || conda install -y -c conda-forge jq
+echo "[install] jq: $(command -v jq) ($(jq --version 2>/dev/null))"
 
 # --- 3. Install the CUDA-matched torch wheel FIRST -------------------------
 # Done before requirements so the env holds a driver-compatible torch; the

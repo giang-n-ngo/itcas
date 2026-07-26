@@ -1,1 +1,1 @@
-rsync -avzP /home/giangn/itcas/results/sweep/casd_llm giangn@login-f.ai.deakin.edu.au:/home/giangn/ITCAS/results/sweep
+rsync -avzP --exclude='*.pdf' /home/giangn/itcas/results/sweep/ giangn@login-f.ai.deakin.edu.au:/home/giangn/ITCAS/results/sweep/

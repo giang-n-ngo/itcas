@@ -19,7 +19,7 @@
 #     QOS=batch-short       # batch-short (<=5d) or batch-long (<=10d).
 #     TIME=1-00:00:00       # per-job wallclock limit (D-HH:MM:SS).
 #     GPUS=1                # GPUs per job; type-qualify as v100:1 if required.
-#     CONDA_ENV=itcas       # conda env to activate on the node (recommended).
+#     CONDA_ENV=itcas       # conda env to activate here (for jq) and on the job node.
 #     ACCOUNT=...           # only if your site requires one (not needed here).
 #     DRY_RUN=1             # print the sbatch command without submitting.
 #
@@ -37,7 +37,21 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 [[ -f "${JOBS_JSON}" ]] || { echo "ERROR: '${JOBS_JSON}' not found." >&2; exit 2; }
-command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required." >&2; exit 2; }
+
+# Activate CONDA_ENV in THIS shell (not just forward it to the job) so `jq`
+# — installed into the env by install_env.sbatch via conda-forge — is on PATH
+# for the preflight checks below, which run here on the login node before
+# anything is submitted. Mirrors the equivalent block in m_submit.sh.
+if [[ -n "${CONDA_ENV:-}" ]]; then
+    module purge 2>/dev/null || true
+    module load "${CONDA_MODULE:-Anaconda3}" 2>/dev/null || true
+    source activate 2>/dev/null || true
+    eval "$(conda shell.bash hook)" 2>/dev/null || true
+    conda activate "${CONDA_ENV}" || {
+        echo "ERROR: failed to 'conda activate ${CONDA_ENV}'." >&2; exit 3; }
+fi
+
+command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required (set CONDA_ENV=<env with jq installed>, e.g. via install_env.sbatch)." >&2; exit 2; }
 
 # Validate the spec and count sets after expanding jobs.
 # Supported schemas:
