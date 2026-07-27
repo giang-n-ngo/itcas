@@ -1771,13 +1771,12 @@ def _plot_relative_auc_by_difficulty_figure(
     column, whereas this figure draws one line per method per column, plotted
     across difficulty levels on the x-axis, so a method's trend as the
     problem gets harder/easier stays visible. ``x_axis_label``, when given,
-    is drawn once, centered under the whole figure (via ``fig.text`` at a
-    y-position below the shared bottom legend, rather than ``fig.supxlabel``,
-    which would sit close enough to overlap it); omit it (the default) to
-    reproduce the previous behavior of no axis title, just bare level tick
-    labels -- appropriate for FF/CASD, whose difficulty levels are arbitrary
-    numbered tiers, not a labelable quantity like a feasible-set proportion.
-    Unlike the bar/box figures, the
+    is drawn as every panel's own ``ax.set_xlabel`` (not one shared
+    figure-level label) so it reads correctly however many panels this
+    figure ends up with; omit it (the default) to reproduce the previous
+    behavior of no axis title, just bare level tick labels -- appropriate
+    for FF/CASD, whose difficulty levels are arbitrary numbered tiers, not a
+    labelable quantity like a feasible-set proportion. Unlike the bar/box figures, the
     variation shown here is *not* collapsed away either: each line is
     surrounded by a shaded interquartile band (see :func:`_draw_metric_line_panel`)
     built directly from the same per-level ratio list, so a level's spread
@@ -1828,6 +1827,8 @@ def _plot_relative_auc_by_difficulty_figure(
         )
         arrow = "↑" if spec.higher_is_better else "↓"
         ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=12)
+        if x_axis_label is not None:
+            ax.set_xlabel(x_axis_label, fontsize=11)
         if c_idx == 0:
             ax.set_ylabel("Relative AUC by difficulty\n(1.0 = best)", fontsize=12)
 
@@ -1836,6 +1837,8 @@ def _plot_relative_auc_by_difficulty_figure(
         higher_is_better=True,
     )
     axes[-1].set_title("Product ↑\n(raw)", fontsize=12)
+    if x_axis_label is not None:
+        axes[-1].set_xlabel(x_axis_label, fontsize=11)
 
     handles, labels = axes[0].get_legend_handles_labels()
     if handles:
@@ -1844,8 +1847,106 @@ def _plot_relative_auc_by_difficulty_figure(
             fontsize=10.5, bbox_to_anchor=(0.5, -0.05),
         )
 
-    if x_axis_label is not None:
-        fig.text(0.5, -0.16, x_axis_label, fontsize=12, ha="center")
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _plot_relative_auc_by_difficulty_grid_figure(
+    relative_auc_by_level: list[tuple[str, dict[str, dict[str, list[float]]]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+    x_axis_label: Optional[str] = None,
+    legend_in_corner: bool = True,
+) -> Optional[Path]:
+    """Standalone 2x2-grid line-plot figure: relative-AUC ratio (+ IQR band) per metric, across difficulty.
+
+    A 2x2-grid sibling of :func:`_plot_relative_auc_by_difficulty_figure`: same
+    per-panel content (:func:`_draw_metric_line_panel`, same line + shaded
+    IQR-band convention, same ``y=1.0`` reference line, same per-panel
+    categorical difficulty x-ticks), but laid out as a 2x2 grid of the
+    (exactly four) :class:`MetricSpec`\\ s in ``metrics_present`` instead of
+    one wide row -- mirroring :func:`_plot_relative_auc_box_grid_figure`'s own
+    2x2 layout choice for the same reason: this never draws a **product**
+    panel either (there is no fifth panel to place in a 2x2 grid, and the
+    product column has no ``MetricSpec``/direction of its own to plot
+    alongside four fixed metric panels here).
+
+    Panels are filled row-major (``metrics_present[0]`` top-left,
+    ``metrics_present[1]`` top-right, ``metrics_present[2]`` bottom-left,
+    ``metrics_present[3]`` bottom-right); any panel beyond the fourth is
+    silently dropped and any short of four leaves the remaining grid cell(s)
+    blank (axis turned off) rather than crashing. Each panel is forced
+    **square** (``ax.set_box_aspect(1)``) regardless of the figure's own
+    aspect ratio.
+
+    One legend, shared across the whole figure, built from the first panel
+    that actually plotted a line (not unconditionally the bottom-right one --
+    a 2x2 grid panel can be the all-"(no data)" one while a later panel has
+    real lines). ``legend_in_corner`` (default ``True``, the NDIG
+    kernel-ablation report's own convention) draws it *inside* the last
+    populated panel (the bottom-right one in the guaranteed-4-metric case
+    this package always has), ``loc="upper right"``, single column so
+    entries stack vertically (see
+    :func:`_plot_normalized_avg_curve_grid_figure`'s sibling
+    ``loc="lower right"`` placement in its own panel). ``legend_in_corner=False`` (the
+    synthetic-comparison report's convention) instead draws one whole-figure
+    horizontal legend below the grid (``loc="lower center"``, one row,
+    ``bbox_to_anchor=(0.5, -0.1)`` -- the exact vertical offset
+    :func:`_plot_normalized_avg_curve_figure` already uses for its own
+    below-figure legend, so the two synthetic-comparison figures' legends sit
+    the same visual distance below their panels' x-axis titles).
+    ``x_axis_label``, when given, is drawn as every panel's own
+    ``ax.set_xlabel`` (not one shared figure-level label), matching the
+    one-row figure's own per-panel handling.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    if not metrics_present:
+        return None
+
+    panels = metrics_present[:4]
+    fig, axes = plt.subplots(2, 2, figsize=(9.0, 9.0), squeeze=False)
+    flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
+
+    for ax, spec in zip(flat_axes, panels):
+        _draw_metric_line_panel(
+            ax, relative_auc_by_level, spec.key, methods, method_styles, method_labels,
+            higher_is_better=spec.higher_is_better,
+        )
+        arrow = "↑" if spec.higher_is_better else "↓"
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=12)
+        if x_axis_label is not None:
+            ax.set_xlabel(x_axis_label, fontsize=11)
+        ax.set_box_aspect(1)
+
+    for ax in flat_axes[len(panels):]:
+        ax.axis("off")
+
+    handles, labels = [], []
+    for ax in flat_axes:
+        h, l = ax.get_legend_handles_labels()
+        if h:
+            handles, labels = h, l
+            break
+    if handles and panels:
+        if legend_in_corner:
+            legend_ax = flat_axes[len(panels) - 1]
+            legend_ax.legend(handles, labels, loc="upper right", ncol=1, fontsize=10.5)
+        else:
+            fig.legend(
+                handles, labels, loc="lower center", ncol=min(len(labels), 6),
+                fontsize=10.5, bbox_to_anchor=(0.5, -0.1),
+            )
 
     fig.tight_layout()
     out_path = Path(out_path)
@@ -2338,6 +2439,92 @@ def _plot_normalized_avg_curve_figure(
     return out_path
 
 
+def _plot_normalized_avg_curve_grid_figure(
+    pct_grid: list[float],
+    curve_lists: dict[str, dict[str, list[list[float]]]],
+    methods: list[str],
+    method_styles: dict[str, dict],
+    metrics_present: list[MetricSpec],
+    out_path: str | Path,
+    method_labels: Optional[dict[str, str]] = None,
+) -> Optional[Path]:
+    """Standalone 2x2-grid line-plot figure: normalized metric curve (+ IQR band) vs % of budget.
+
+    A 2x2-grid sibling of :func:`_plot_normalized_avg_curve_figure`: same
+    per-panel content (:func:`_draw_normalized_curve_panel`, same
+    continuous shared ``pct_grid`` x-axis, same "% of evaluation budget"
+    x-label on every panel), but laid out as a 2x2 grid of the (exactly four)
+    :class:`MetricSpec`\\ s in ``metrics_present`` instead of one wide row --
+    mirroring :func:`_plot_relative_auc_box_grid_figure`'s/
+    :func:`_plot_relative_auc_by_difficulty_grid_figure`'s own 2x2 layout
+    choice for the same reason: this never draws a **product** panel either.
+
+    Panels are filled row-major; any panel beyond the fourth is silently
+    dropped and any short of four leaves the remaining grid cell(s) blank
+    (axis turned off) rather than crashing. Each panel is forced **square**
+    (``ax.set_box_aspect(1)``) regardless of the figure's own aspect ratio.
+    One legend, shared across the whole figure but drawn *inside* the
+    bottom-right panel (``loc="lower right"``, single column so entries
+    stack vertically) instead of a whole-figure legend below the grid --
+    built from the first panel that actually plotted a line (not
+    unconditionally the bottom-right one), but always attached to the last
+    populated panel (the bottom-right one in the guaranteed-4-metric case
+    this package always has) -- mirrors
+    :func:`_plot_relative_auc_by_difficulty_grid_figure`'s own corner-legend
+    placement (that figure uses ``"upper right"`` for its own panel; this one
+    uses ``"lower right"`` so the legend sits beside the panel's own
+    "% of evaluation budget" x-axis label instead of overlapping the top of
+    the curve).
+
+    Returns ``None`` (writing nothing) when ``metrics_present`` is empty,
+    the same "no metrics -> no figure" contract as every sibling
+    ``_plot_*_figure``.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    if not metrics_present:
+        return None
+
+    panels = metrics_present[:4]
+    fig, axes = plt.subplots(2, 2, figsize=(9.0, 9.0), squeeze=False)
+    flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
+
+    for ax, spec in zip(flat_axes, panels):
+        ok = _draw_normalized_curve_panel(
+            ax, pct_grid, curve_lists.get(spec.key, {}), methods, method_styles, method_labels,
+        )
+        if not ok:
+            ax.text(0.5, 0.5, "(no data)", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=12, color="grey")
+        arrow = "↑" if spec.higher_is_better else "↓"
+        ax.set_title(f"{_SHORT_CURVE_LABELS.get(spec.key, spec.label)} {arrow}", fontsize=12)
+        ax.set_xlabel("% of evaluation budget", fontsize=11)
+        ax.set_box_aspect(1)
+
+    for ax in flat_axes[len(panels):]:
+        ax.axis("off")
+
+    handles, labels = [], []
+    for ax in flat_axes:
+        h, l = ax.get_legend_handles_labels()
+        if h:
+            handles, labels = h, l
+            break
+    if handles and panels:
+        legend_ax = flat_axes[len(panels) - 1]
+        legend_ax.legend(handles, labels, loc="lower right", ncol=1, fontsize=10.5)
+
+    fig.tight_layout()
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, format="pdf", bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 def normalized_avg_curve_figure_over_rows(
     rows: list,
     methods: list[str],
@@ -2402,11 +2589,9 @@ def _plot_batch_improvement_heatmap(
     carry its own printed value comfortably. ``difficulties`` is the desired
     left-to-right column order (raw difficulty tags, e.g. ``"p0_01"``);
     rendered as a feasible-set percent (``"1%"``, via :func:`_feasible_pct_label`)
-    rather than the raw tag, with one shared x-axis label
-    ("Proportion of the feasible set (i.e., difficulty level)", via
-    ``fig.supxlabel`` -- safe here since, unlike the by-difficulty line
-    figure, this heatmap has no legend below the panels to collide with)
-    instead of repeating an axis title on every panel.
+    rather than the raw tag, with ``"Difficulty level"`` drawn as every
+    panel's own ``ax.set_xlabel`` (not one shared ``fig.supxlabel``) so each
+    panel reads correctly on its own.
 
     Each panel is independently colour-scaled (``TwoSlopeNorm(vcenter=0)``
     over that panel's own finite values' max absolute magnitude) rather than
@@ -2477,6 +2662,7 @@ def _plot_batch_improvement_heatmap(
             # the leftmost panel carries them.
             ax.set_yticklabels([])
         ax.set_title(title, fontsize=12)
+        ax.set_xlabel("Difficulty level", fontsize=11)
 
         for r_idx in range(n_rows_grid):
             for d_idx in range(n_diffs):
@@ -2495,7 +2681,6 @@ def _plot_batch_improvement_heatmap(
 
         fig.colorbar(im, ax=ax, shrink=0.7)
 
-    fig.supxlabel("Proportion of the feasible set (i.e., difficulty level)", fontsize=12)
     fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2776,8 +2961,10 @@ def _render_synthetic_aggregate(
     three per-difficulty outputs above, these two are written directly under
     ``output_dir``, not a per-difficulty subfolder:
 
-    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` (see
-      :func:`_plot_relative_auc_by_difficulty_figure`). Its shaded band shows
+    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` (a 2x2 grid of
+      the 4 metrics, no product panel, horizontal legend below the grid --
+      see :func:`_plot_relative_auc_by_difficulty_grid_figure`). Its shaded
+      band shows
       spread **across problems** at each difficulty, not across seeds: a
       "row" in this split/aggregate pipeline already collapses each
       problem's own seeds down to one ratio inside its own per-problem job
@@ -2841,15 +3028,24 @@ def _render_synthetic_aggregate(
         md_path.write_text(_synthetic_report_to_markdown(report, diff), encoding="utf-8")
         paths.extend([str(json_path), str(md_path)])
 
-    # One top-level (not per-difficulty) line-plot figure spanning every
-    # difficulty at once -- see _plot_relative_auc_by_difficulty_figure and
-    # this function's own docstring. `combined[diff]["relative_auc_lists"]`
+    # One top-level (not per-difficulty) 2x2-grid figure spanning every
+    # difficulty at once -- see _plot_relative_auc_by_difficulty_grid_figure
+    # and this function's own docstring. `combined[diff]["relative_auc_lists"]`
     # is already exactly one difficulty's own {column_key: {method: [ratio,
     # ...]}} -- one ratio per problem present at that difficulty, never
     # averaged across difficulties -- so no further per-level computation is
     # needed here; `_draw_metric_line_panel` does its own mean-point/IQR-band
     # reduction from this list. As noted in this function's docstring, the
-    # resulting band shows spread across *problems*, not seeds.
+    # resulting band shows spread across *problems*, not seeds. Laid out as a
+    # 2x2 grid of the 4 metrics (no product panel, unlike the one-row
+    # `_plot_relative_auc_by_difficulty_figure` other reports in this package
+    # use) with a horizontal legend below the grid (`legend_in_corner=False`)
+    # rather than the NDIG-ablation report's own inside-the-panel corner
+    # legend -- `bbox_to_anchor=(0.5, -0.1)` matches
+    # `_plot_normalized_avg_curve_figure`'s own below-figure legend spacing
+    # (this synthetic pipeline's other top-level figure, rendered just below)
+    # so both figures' legends sit the same visual distance under their
+    # panels' x-axis titles.
     if combined:
         # Tick labels are the feasible-fraction percent (e.g. "1%" for the
         # p0_01/threshold_pct=0.01 level), not the raw key -- see
@@ -2863,10 +3059,10 @@ def _render_synthetic_aggregate(
         metric_keys_all = {s.key for e in combined.values() for s in e["metrics_present"]}
         metrics_present_all = [s for s in _ordered_metrics() if s.key in metric_keys_all]
         by_diff_path = out_dir / "synthetic_comparison_relative_auc_by_difficulty.pdf"
-        ok = _plot_relative_auc_by_difficulty_figure(
+        ok = _plot_relative_auc_by_difficulty_grid_figure(
             relative_auc_by_level, list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
             metrics_present_all, by_diff_path, method_labels=METHOD_ABBREVIATIONS,
-            x_axis_label="Proportion of the feasible set (i.e., difficulty level)",
+            x_axis_label="Difficulty level", legend_in_corner=False,
         )
         if ok is not None:
             paths.append(str(ok))
@@ -2964,17 +3160,18 @@ def summarize_synthetic_comparison(
     Additionally writes one figure directly under ``<output_dir>`` (not a
     per-difficulty subfolder, since it spans every difficulty at once):
 
-    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` -- a line-plot
-      sibling of the per-difficulty relative-AUC boxplot above: instead of
-      showing each method's ratio distribution as a box at one difficulty,
-      one line per method is drawn across difficulty levels on the x-axis
-      (each line point the mean of that difficulty's per-problem ratios), so
-      a method's trend as the problem gets harder/easier stays visible; a
-      shaded band around each line shows the interquartile spread **across
-      problems** at that difficulty (not across seeds -- each problem's own
-      seeds are already averaged down to one ratio before this figure ever
-      sees them, see :func:`_render_synthetic_aggregate`'s docstring) (see
-      :func:`_plot_relative_auc_by_difficulty_figure`).
+    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` -- a 2x2-grid
+      line-plot sibling of the per-difficulty relative-AUC boxplot above (4
+      metric panels, no product panel, horizontal legend below the grid):
+      instead of showing each method's ratio distribution as a box at one
+      difficulty, one line per method is drawn across difficulty levels on
+      the x-axis (each line point the mean of that difficulty's per-problem
+      ratios), so a method's trend as the problem gets harder/easier stays
+      visible; a shaded band around each line shows the interquartile spread
+      **across problems** at that difficulty (not across seeds -- each
+      problem's own seeds are already averaged down to one ratio before this
+      figure ever sees them, see :func:`_render_synthetic_aggregate`'s
+      docstring) (see :func:`_plot_relative_auc_by_difficulty_grid_figure`).
 
     See the module-level section docstring above for why this only ever uses
     the evaluations axis and excludes the real-world problems
@@ -3420,9 +3617,61 @@ def main(argv: Optional[list[str]] = None) -> int:
             "any run logs."
         ),
     )
+    parser.add_argument(
+        "--ndig-kernel-ablation-problem", type=str, default=None,
+        dest="ndig_kernel_ablation_problem",
+        help=(
+            "Per-problem half of the split NDIG QD-DPP diversity-kernel "
+            "ablation pipeline (see itcas.reporting.ndig_kernel_ablation_comparison."
+            "summarize_ndig_kernel_ablation_problem): compares the proposed method's "
+            "full batch NDIG acquisition (itcas_ndig) against its two kernel-ablated "
+            "siblings (ndig_no_kobj_batch/ndig_no_kctx_batch). Loads only this one "
+            "problem's runs and -- when --save-metrics is given -- writes "
+            "<save-metrics>/<problem>_ndig_kernel_ablation_metrics.json for a later "
+            "--ndig-kernel-ablation-aggregate-from run. Paired with --input-dir/"
+            "--save-metrics/--problems-config/--auc-cache-dir. Renders no per-problem "
+            "plot -- --output-dir is unused here."
+        ),
+    )
+    parser.add_argument(
+        "--ndig-kernel-ablation-aggregate-from", type=str, default=None,
+        dest="ndig_kernel_ablation_aggregate_from",
+        help=(
+            "Aggregate half of the split NDIG QD-DPP diversity-kernel ablation "
+            "pipeline (see summarize_ndig_kernel_ablation_aggregate): loads every "
+            "*_ndig_kernel_ablation_metrics.json under this directory (written by "
+            "--ndig-kernel-ablation-problem runs) and produces the combined "
+            "relative-AUC-by-difficulty and normalized-curve figures. Paired with "
+            "--output-dir. Does not require --input-dir and never reads any run logs."
+        ),
+    )
     args = parser.parse_args(argv)
 
     kw = dict(alpha=args.alpha)
+
+    if args.ndig_kernel_ablation_problem is not None:
+        from .ndig_kernel_ablation_comparison import summarize_ndig_kernel_ablation_problem
+
+        if args.input_dir is None:
+            parser.error("--input-dir is required for --ndig-kernel-ablation-problem")
+        paths = summarize_ndig_kernel_ablation_problem(
+            args.input_dir, args.ndig_kernel_ablation_problem,
+            problems_config=args.problems_config, output_dir=args.output_dir,
+            save_metrics_dir=args.save_metrics, auc_cache_dir=args.auc_cache_dir,
+        )
+        for p in paths:
+            print(p)
+        return 0
+
+    if args.ndig_kernel_ablation_aggregate_from is not None:
+        from .ndig_kernel_ablation_comparison import summarize_ndig_kernel_ablation_aggregate
+
+        paths = summarize_ndig_kernel_ablation_aggregate(
+            args.ndig_kernel_ablation_aggregate_from, output_dir=args.output_dir,
+        )
+        for p in paths:
+            print(p)
+        return 0
 
     if args.method_group_comparison_problem is not None:
         from .method_group_comparison import summarize_method_group_comparison_problem

@@ -1193,6 +1193,191 @@ def test_ndig_comparison_relative_auc_grid():
         assert pdf_path.stat().st_size > 0
 
 
+def test_ndig_kernel_ablation_comparison_end_to_end():
+    """Tiny fixture end-to-end check for ndig_kernel_ablation_comparison.py:
+    the split per-problem/aggregate pipeline comparing itcas_ndig (full NDIG
+    batch) against its two kernel-ablated siblings (ndig_no_kobj_batch,
+    ndig_no_kctx_batch), plus the "_with_seq" variant that additionally
+    includes itcas_seq_ndig (the forced-sequential sibling, no QD-DPP batch
+    diversity at all).
+
+    Fixture: 2 fake synthetic problems at 2 difficulties (p0_05, p0_10).
+    itcas_ndig gets 3 feasible steps in a row, ndig_no_kobj_batch gets 2,
+    ndig_no_kctx_batch gets 1, itcas_seq_ndig gets 0 -- so itcas_ndig's
+    cumulative-positives curve pointwise dominates every other method's in
+    every row, guaranteeing it has the largest AUC everywhere, and
+    itcas_seq_ndig (0 positives) is always strictly worse than the two
+    ablations too. That makes the relative-AUC ratios directly checkable:
+    itcas_ndig must hit exactly 1.0 (the row best) in every row in BOTH
+    variants, while the two ablations and itcas_seq_ndig must all be
+    strictly below 1.0.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from itcas.reporting import ndig_kernel_ablation_comparison as nka
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        problems = ["fake_problem_a", "fake_problem_b"]
+
+        def write_run(problem, diff, method, seed, feasible_steps):
+            run_dir = root / problem / diff / method
+            run_dir.mkdir(parents=True, exist_ok=True)
+            name = f"{problem}__{method}__{diff}_seed{seed}"
+            n_eval_total = 2
+            lines = []
+            for i, feasible in enumerate(feasible_steps):
+                n_eval_total += 1
+                lines.append(json.dumps({
+                    "step": i + 1, "n_eval_total": n_eval_total, "n_eval_this_iter": 1,
+                    "feasible": [feasible],
+                    "x": [[0.1] * 6],
+                    "y": [[-1.0, -1.5] if feasible else [-100.0, -1.0]],
+                }))
+            (run_dir / f"{name}.jsonl").write_text("\n".join(lines) + "\n")
+            threshold_pct = float(diff[1:].replace("_", "."))
+            (run_dir / f"{name}.summary.json").write_text(json.dumps({
+                "config": {"method": method, "n_init": 2, "seed": seed,
+                           "extra": {"threshold_pct": threshold_pct}},
+                "problem": problem,
+                "n_init": 2,
+                "thresholds": [-30.0, -30.0],
+                "context_dims": [3, 4, 5],
+                "init_X": [[0.0] * 6, [0.1] * 6],
+                "init_Y": [[-1.0, -1.0], [-2.0, -2.0]],
+                "init_feasible": [True, True],
+            }))
+
+        for problem in problems:
+            for diff in ("p0_05", "p0_10"):
+                for seed in range(4):
+                    write_run(problem, diff, "itcas_ndig", seed, feasible_steps=[True, True, True])
+                    write_run(problem, diff, "ndig_no_kobj_batch", seed, feasible_steps=[True, True])
+                    write_run(problem, diff, "ndig_no_kctx_batch", seed, feasible_steps=[True])
+                    write_run(problem, diff, "itcas_seq_ndig", seed, feasible_steps=[False])
+
+        problems_config = root / "problems_config.json"
+        problems_config.write_text(json.dumps({"problems": problems, "temporary": []}))
+
+        out_dir = root / "out"
+        metrics_dir = root / "metrics"
+        auc_cache_dir = root / "auc_cache"
+
+        for problem in problems:
+            paths = nka.summarize_ndig_kernel_ablation_problem(
+                root, problem, problems_config=problems_config,
+                save_metrics_dir=metrics_dir, auc_cache_dir=auc_cache_dir,
+            )
+            assert len(paths) == 1
+            assert Path(paths[0]).name == f"{problem}_ndig_kernel_ablation_metrics.json"
+
+        # --- Direct check of the combined relative-AUC ratios, independent
+        # of the rendered PDFs: itcas_ndig must be the row-best (ratio 1.0)
+        # everywhere, both ablations strictly below 1.0, in BOTH the base
+        # (3-method) and "_with_seq" (4-method) variants.
+        summaries_by_problem = {}
+        for f in sorted(metrics_dir.glob("*_ndig_kernel_ablation_metrics.json")):
+            problem, diffs = nka.load_ablation_problem_metrics(f)
+            summaries_by_problem[problem] = diffs
+        combined = nka._combine_ablation_summaries(summaries_by_problem)
+        assert set(combined) == {"p0_05", "p0_10"}
+        for diff in ("p0_05", "p0_10"):
+            ratios = combined[diff]["relative_auc_lists"]["cumulative_positives"]
+            assert all(v == 1.0 for v in ratios["itcas_ndig"])
+            assert all(v < 1.0 for v in ratios["ndig_no_kobj_batch"])
+            assert all(v < 1.0 for v in ratios["ndig_no_kctx_batch"])
+
+        combined_with_seq = nka._combine_ablation_summaries(summaries_by_problem, variant_key="_with_seq")
+        assert set(combined_with_seq) == {"p0_05", "p0_10"}
+        for diff in ("p0_05", "p0_10"):
+            ratios = combined_with_seq[diff]["relative_auc_lists"]["cumulative_positives"]
+            assert all(v == 1.0 for v in ratios["itcas_ndig"])
+            assert all(v < 1.0 for v in ratios["ndig_no_kobj_batch"])
+            assert all(v < 1.0 for v in ratios["ndig_no_kctx_batch"])
+            assert all(v < 1.0 for v in ratios["itcas_seq_ndig"])
+
+        # --- End-to-end: the aggregate stage produces exactly the four
+        # documented PDFs (base + "_with_seq" pair), correctly named and
+        # non-empty.
+        paths = nka.summarize_ndig_kernel_ablation_aggregate(metrics_dir, output_dir=out_dir)
+        names = {Path(p).name for p in paths}
+        assert names == {
+            "ndig_kernel_ablation_relative_auc_by_difficulty.pdf",
+            "ndig_kernel_ablation_normalized_avg_curve_vs_pct_budget.pdf",
+            "ndig_kernel_ablation_relative_auc_by_difficulty_with_seq.pdf",
+            "ndig_kernel_ablation_normalized_avg_curve_vs_pct_budget_with_seq.pdf",
+        }
+        for p in paths:
+            pdf_path = Path(p)
+            assert pdf_path.exists()
+            assert pdf_path.stat().st_size > 0
+
+
+def test_ndig_kernel_ablation_summary_figures_are_2x2_grids():
+    """The two ndig_kernel_ablation_comparison summary figures must each be
+    laid out as a 2x2 grid of the 4 metrics (no product panel), mirroring
+    summary._plot_relative_auc_box_grid_figure's existing 2x2 convention --
+    not the one-row-per-metric layout every other report's sibling figure
+    uses. Intercepts matplotlib.pyplot.close (called at the end of each
+    plotting function) to inspect the Figure's axes grid before it is
+    discarded, since neither function returns the Figure itself.
+    """
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from itcas.reporting.summary import (
+        _ordered_metrics,
+        _plot_normalized_avg_curve_grid_figure,
+        _plot_relative_auc_by_difficulty_grid_figure,
+    )
+
+    metrics_present = _ordered_metrics()
+    assert len(metrics_present) == 4, "fixture assumes exactly 4 registered metrics"
+    methods = ["itcas_ndig", "ndig_no_kobj_batch", "ndig_no_kctx_batch"]
+    method_styles = {
+        "itcas_ndig": {"color": "#1f77b4", "linestyle": "-"},
+        "ndig_no_kobj_batch": {"color": "#ff7f0e", "linestyle": "-"},
+        "ndig_no_kctx_batch": {"color": "#2ca02c", "linestyle": "-"},
+    }
+
+    def _captured_fig(render_fn):
+        captured = {}
+        real_close = __import__("matplotlib.pyplot", fromlist=["close"]).close
+
+        def fake_close(fig):
+            captured["fig"] = fig
+            return real_close(fig)
+
+        with patch("matplotlib.pyplot.close", side_effect=fake_close):
+            out_path = render_fn()
+        assert out_path is not None
+        return captured["fig"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+
+        relative_auc_by_level = [
+            (diff, {spec.key: {m: [1.0] for m in methods} for spec in metrics_present})
+            for diff in ("p0_01", "p0_05")
+        ]
+        fig1 = _captured_fig(lambda: _plot_relative_auc_by_difficulty_grid_figure(
+            relative_auc_by_level, methods, method_styles, metrics_present,
+            tmp_dir / "relative_auc.pdf",
+        ))
+        assert len(fig1.get_axes()) == 4, f"expected a 2x2 grid (4 axes), got {len(fig1.get_axes())}"
+
+        pct_grid = [0.0, 50.0, 100.0]
+        curve_lists = {spec.key: {m: [[1.0, 1.0, 1.0]] for m in methods} for spec in metrics_present}
+        fig2 = _captured_fig(lambda: _plot_normalized_avg_curve_grid_figure(
+            pct_grid, curve_lists, methods, method_styles, metrics_present,
+            tmp_dir / "normalized_curve.pdf",
+        ))
+        assert len(fig2.get_axes()) == 4, f"expected a 2x2 grid (4 axes), got {len(fig2.get_axes())}"
+
+
 def test_forward_fill_at_carries_last_known_value():
     from itcas.reporting.summary import _forward_fill_at
 

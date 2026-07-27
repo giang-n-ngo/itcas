@@ -35,6 +35,11 @@ METHOD_ABBREVIATIONS: dict[str, str] = {
     "moc_cas_hard_batch": "MOC-CAS-B",
     "straddle_then_sample_lse10_batch": "STR-TS-10-B",
     "bes_then_sample_lse10_batch": "BES-TS-10-B",
+    # QD-DPP diversity-kernel ablations of the proposed method's own batch
+    # NDIG acquisition (itcas_ndig / "NDIG-B" above) -- see
+    # ndig_kernel_ablation_comparison.py, which shows all three together.
+    "ndig_no_kobj_batch": "NDIG-B (no k_obj)",
+    "ndig_no_kctx_batch": "NDIG-B (no k_ctx)",
 }
 
 
