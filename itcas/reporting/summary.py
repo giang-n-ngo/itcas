@@ -864,7 +864,7 @@ def _plot_problem_curves(
         fig.legend(
             list(handles_seen.values()), list(handles_seen.keys()),
             loc="lower center", ncol=min(len(methods), 6),
-            fontsize=12, bbox_to_anchor=(0.5, 0.0),
+            fontsize=12, bbox_to_anchor=(0.5, -0.1),
         )
         fig.tight_layout(rect=(0, 0.06, 1, 1))
     else:
@@ -1659,7 +1659,7 @@ def _plot_relative_auc_box_grid_figure(
     ]
     fig.legend(
         handles=legend_handles, loc="lower center", ncol=len(methods),
-        fontsize=12, bbox_to_anchor=(0.5, -0.05),
+        fontsize=12, bbox_to_anchor=(0.5, -0.1),
     )
     fig.text(
         0.5, -0.13,
@@ -1844,7 +1844,7 @@ def _plot_relative_auc_by_difficulty_figure(
     if handles:
         fig.legend(
             handles, labels, loc="lower center", ncol=min(len(labels), 6),
-            fontsize=10.5, bbox_to_anchor=(0.5, -0.05),
+            fontsize=10.5, bbox_to_anchor=(0.5, -0.1),
         )
 
     fig.tight_layout()
@@ -1864,6 +1864,7 @@ def _plot_relative_auc_by_difficulty_grid_figure(
     method_labels: Optional[dict[str, str]] = None,
     x_axis_label: Optional[str] = None,
     legend_in_corner: bool = True,
+    fig_height: float = 9.0,
 ) -> Optional[Path]:
     """Standalone 2x2-grid line-plot figure: relative-AUC ratio (+ IQR band) per metric, across difficulty.
 
@@ -1905,6 +1906,12 @@ def _plot_relative_auc_by_difficulty_grid_figure(
     ``x_axis_label``, when given, is drawn as every panel's own
     ``ax.set_xlabel`` (not one shared figure-level label), matching the
     one-row figure's own per-panel handling.
+
+    ``fig_height`` (default ``9.0``, the figure's original fixed height)
+    lets a caller shrink the figure vertically -- panels stay square via
+    ``ax.set_box_aspect(1)`` regardless, so a shorter figure just leaves
+    ``bbox_inches="tight"`` to crop more whitespace column-wise at save
+    time. Width stays fixed at ``9.0``.
     """
     import matplotlib
 
@@ -1915,7 +1922,7 @@ def _plot_relative_auc_by_difficulty_grid_figure(
         return None
 
     panels = metrics_present[:4]
-    fig, axes = plt.subplots(2, 2, figsize=(9.0, 9.0), squeeze=False)
+    fig, axes = plt.subplots(2, 2, figsize=(9.0, fig_height), squeeze=False)
     flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
 
     for ax, spec in zip(flat_axes, panels):
@@ -2489,7 +2496,7 @@ def _plot_normalized_avg_curve_grid_figure(
         return None
 
     panels = metrics_present[:4]
-    fig, axes = plt.subplots(2, 2, figsize=(9.0, 9.0), squeeze=False)
+    fig, axes = plt.subplots(2, 2, figsize=(9.0, 7.0), squeeze=False)
     flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
 
     for ax, spec in zip(flat_axes, panels):
@@ -2623,7 +2630,7 @@ def _plot_batch_improvement_heatmap(
     n_rows_grid = len(families)
     n_diffs = len(difficulties)
     fig_w = max(3.2 * n_cols, 10.0)
-    fig_h = max(0.55 * n_rows_grid + 1.8, 3.5)
+    fig_h = max(0.45 * n_rows_grid + 1.3, 3.0)
     fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
     axes = axes[0]
 

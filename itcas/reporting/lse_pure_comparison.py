@@ -181,7 +181,7 @@ def _plot_pure_vs_ts_figure(
     box_width = 0.7
     group_gap = 1.0  # extra vertical space between one base's band and the next
 
-    fig, ax = plt.subplots(figsize=(8.0, 0.6 * n_var * len(bases) + 1.5))
+    fig, ax = plt.subplots(figsize=(8.0, 0.45 * n_var * len(bases) + 1.2))
 
     group_centers: dict[str, float] = {}
     any_box = False
