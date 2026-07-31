@@ -864,7 +864,7 @@ def _plot_problem_curves(
         fig.legend(
             list(handles_seen.values()), list(handles_seen.keys()),
             loc="lower center", ncol=min(len(methods), 6),
-            fontsize=12, bbox_to_anchor=(0.5, -0.1),
+            fontsize=12, bbox_to_anchor=(0.5, -0.02),
         )
         fig.tight_layout(rect=(0, 0.06, 1, 1))
     else:
@@ -1659,15 +1659,21 @@ def _plot_relative_auc_box_grid_figure(
     ]
     fig.legend(
         handles=legend_handles, loc="lower center", ncol=len(methods),
-        fontsize=12, bbox_to_anchor=(0.5, -0.1),
+        fontsize=12, bbox_to_anchor=(0.5, -0.04),
     )
     fig.text(
-        0.5, -0.13,
+        0.5, -0.1,
         "Avg relative AUC across synthetic problems and difficulty (1.0 = best)",
         fontsize=12, ha="center",
     )
 
-    fig.tight_layout()
+    # Two lines sit below the grid here (legend + caption), so this needs
+    # more reserved bottom margin than the single-line below-grid legends
+    # elsewhere in this package (see _plot_problem_curves's own rect) --
+    # otherwise a bare tight_layout() leaves the gap to drift with fig size
+    # instead of staying the small, controlled gap the -0.04/-0.1 offsets
+    # above assume.
+    fig.tight_layout(rect=(0, 0.1, 1, 1))
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -1844,10 +1850,16 @@ def _plot_relative_auc_by_difficulty_figure(
     if handles:
         fig.legend(
             handles, labels, loc="lower center", ncol=min(len(labels), 6),
-            fontsize=10.5, bbox_to_anchor=(0.5, -0.1),
+            fontsize=10.5, bbox_to_anchor=(0.5, -0.02),
         )
-
-    fig.tight_layout()
+        # Reserve room for the below-grid legend -- a bare tight_layout()
+        # doesn't know about it (it's a figure-level artist, not attached to
+        # any Axes), so the gap would otherwise drift with figure size
+        # instead of staying this small, controlled distance (see
+        # _plot_relative_auc_by_difficulty_grid_figure's own identical fix).
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
+    else:
+        fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -1864,6 +1876,7 @@ def _plot_relative_auc_by_difficulty_grid_figure(
     method_labels: Optional[dict[str, str]] = None,
     x_axis_label: Optional[str] = None,
     legend_in_corner: bool = True,
+    fig_width: float = 9.0,
     fig_height: float = 9.0,
 ) -> Optional[Path]:
     """Standalone 2x2-grid line-plot figure: relative-AUC ratio (+ IQR band) per metric, across difficulty.
@@ -1899,10 +1912,14 @@ def _plot_relative_auc_by_difficulty_grid_figure(
     ``loc="lower right"`` placement in its own panel). ``legend_in_corner=False`` (the
     synthetic-comparison report's convention) instead draws one whole-figure
     horizontal legend below the grid (``loc="lower center"``, one row,
-    ``bbox_to_anchor=(0.5, -0.1)`` -- the exact vertical offset
-    :func:`_plot_normalized_avg_curve_figure` already uses for its own
-    below-figure legend, so the two synthetic-comparison figures' legends sit
-    the same visual distance below their panels' x-axis titles).
+    ``bbox_to_anchor=(0.5, -0.02)`` plus a reserved ``rect=(0, 0.06, 1, 1)``
+    bottom margin on the following ``tight_layout`` call -- the same tight,
+    controlled gap every other below-grid legend in this package now uses
+    (see :func:`_plot_normalized_avg_curve_figure`,
+    :func:`_plot_relative_auc_by_difficulty_figure`, and
+    ``itcas.reporting.casd_sampled_points._plot_group_figure``), so every
+    such figure's legend sits the same small visual distance below its
+    panels' x-axis titles regardless of that figure's own height.
     ``x_axis_label``, when given, is drawn as every panel's own
     ``ax.set_xlabel`` (not one shared figure-level label), matching the
     one-row figure's own per-panel handling.
@@ -1911,7 +1928,12 @@ def _plot_relative_auc_by_difficulty_grid_figure(
     lets a caller shrink the figure vertically -- panels stay square via
     ``ax.set_box_aspect(1)`` regardless, so a shorter figure just leaves
     ``bbox_inches="tight"`` to crop more whitespace column-wise at save
-    time. Width stays fixed at ``9.0``.
+    time. ``fig_width`` (default ``9.0``) shrinks the figure horizontally to
+    match -- panels are forced square via ``ax.set_box_aspect(1)``, so
+    shrinking ``fig_height`` alone without also shrinking ``fig_width``
+    leaves each square panel's actual size bound by the (unchanged) width,
+    and the "saved" height just becomes dead whitespace above the legend
+    instead of a genuinely smaller figure.
     """
     import matplotlib
 
@@ -1922,7 +1944,7 @@ def _plot_relative_auc_by_difficulty_grid_figure(
         return None
 
     panels = metrics_present[:4]
-    fig, axes = plt.subplots(2, 2, figsize=(9.0, fig_height), squeeze=False)
+    fig, axes = plt.subplots(2, 2, figsize=(fig_width, fig_height), squeeze=False)
     flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
 
     for ax, spec in zip(flat_axes, panels):
@@ -1945,6 +1967,7 @@ def _plot_relative_auc_by_difficulty_grid_figure(
         if h:
             handles, labels = h, l
             break
+    below_grid_legend = False
     if handles and panels:
         if legend_in_corner:
             legend_ax = flat_axes[len(panels) - 1]
@@ -1952,10 +1975,24 @@ def _plot_relative_auc_by_difficulty_grid_figure(
         else:
             fig.legend(
                 handles, labels, loc="lower center", ncol=min(len(labels), 6),
-                fontsize=10.5, bbox_to_anchor=(0.5, -0.1),
+                fontsize=10.5, bbox_to_anchor=(0.5, -0.02),
             )
+            below_grid_legend = True
 
-    fig.tight_layout()
+    # A bare tight_layout() reserves no room for the fig-level legend below
+    # the grid (tight_layout only ever sees the Axes, never a figure-level
+    # artist placed outside them), so the gap between the bottom row's
+    # x-axis label and the legend is whatever slack tight_layout's own
+    # default padding happens to leave -- that slack shifts unpredictably
+    # with fig_height instead of staying the small, controlled gap
+    # bbox_to_anchor's -0.02 implies. Reserving the same bottom margin this
+    # package's other below-grid legends already use (see
+    # itcas.reporting.casd_sampled_points._plot_group_figure) keeps the gap
+    # tight and consistent regardless of fig_height.
+    if below_grid_legend:
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
+    else:
+        fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -2395,12 +2432,7 @@ def _plot_normalized_avg_curve_figure(
 
     n_cols = len(metrics_present) + 1  # + product
     fig_w = max(3.0 * n_cols, 10.0)
-    # Slightly taller than _plot_relative_auc_by_difficulty_figure's
-    # fig_h=3.5: every panel here also carries its own "% of evaluation
-    # budget" x-label (that figure only has categorical x-tick labels, no
-    # axis label), so a little more vertical room keeps the legend from
-    # sitting flush against it.
-    fig_h = 3.75
+    fig_h = 2.9
     fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
     axes = axes[0]
 
@@ -2435,10 +2467,16 @@ def _plot_normalized_avg_curve_figure(
     if handles:
         fig.legend(
             handles, labels, loc="lower center", ncol=min(len(labels), 6),
-            fontsize=10.5, bbox_to_anchor=(0.5, -0.1),
+            fontsize=10.5, bbox_to_anchor=(0.5, -0.02),
         )
-
-    fig.tight_layout()
+        # Reserve room for the below-grid legend -- a bare tight_layout()
+        # doesn't know about it (it's a figure-level artist, not attached to
+        # any Axes), so the gap would otherwise drift with figure size
+        # instead of staying this small, controlled distance (see
+        # _plot_relative_auc_by_difficulty_grid_figure's own identical fix).
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
+    else:
+        fig.tight_layout()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, format="pdf", bbox_inches="tight")
@@ -2572,7 +2610,17 @@ def _plot_batch_improvement_heatmap(
     metrics_present: list[MetricSpec],
     out_path: str | Path,
 ) -> Optional[Path]:
-    """One PDF: a row of heatmap panels, one per metric (+ ``"product"``).
+    """One PDF: a 2x2 grid of heatmap panels, one per metric (no product panel).
+
+    Mirrors :func:`_plot_relative_auc_box_grid_figure`'s 2x2-grid convention:
+    panels are filled row-major (``metrics_present[0]`` top-left,
+    ``metrics_present[1]`` top-right, ``metrics_present[2]`` bottom-left,
+    ``metrics_present[3]`` bottom-right); any panel beyond the fourth is
+    silently dropped and any short of four leaves the remaining grid cell(s)
+    blank (axis turned off) rather than crashing. There is no product panel
+    here -- unlike the row layout this replaces, a 2x2 grid has no fifth cell
+    to spare, and the product column has no :class:`MetricSpec`/direction of
+    its own to plot alongside four fixed metric panels.
 
     Each panel is a ``len(families)`` x ``len(difficulties)`` grid of
     %-change-in-mean-AUC cells (see
@@ -2590,15 +2638,16 @@ def _plot_batch_improvement_heatmap(
     method first); only ``family_key`` (to look up ``pct_by_column``) and
     ``display_label`` (the y-tick text) are used here -- the method names
     themselves are irrelevant to rendering. ``display_label`` is drawn as a
-    y-tick only on the **leftmost** panel -- every panel shares the same row
-    order, so repeating it on all five would waste width without adding
-    information; the freed-up space is what makes each cell large enough to
-    carry its own printed value comfortably. ``difficulties`` is the desired
-    left-to-right column order (raw difficulty tags, e.g. ``"p0_01"``);
-    rendered as a feasible-set percent (``"1%"``, via :func:`_feasible_pct_label`)
-    rather than the raw tag, with ``"Difficulty level"`` drawn as every
-    panel's own ``ax.set_xlabel`` (not one shared ``fig.supxlabel``) so each
-    panel reads correctly on its own.
+    y-tick only on the **left column** of the grid (panel index 0 and 2) --
+    both panels in that column share the same row order, so repeating it on
+    the right column would waste width without adding information; the
+    freed-up space is what makes each cell large enough to carry its own
+    printed value comfortably. ``difficulties`` is the desired left-to-right
+    column order (raw difficulty tags, e.g. ``"p0_01"``); rendered as a
+    feasible-set percent (``"1%"``, via :func:`_feasible_pct_label`) rather
+    than the raw tag, with ``"Difficulty level"`` drawn as every panel's own
+    ``ax.set_xlabel`` (not one shared ``fig.supxlabel``) so each panel reads
+    correctly on its own.
 
     Each panel is independently colour-scaled (``TwoSlopeNorm(vcenter=0)``
     over that panel's own finite values' max absolute magnitude) rather than
@@ -2624,21 +2673,18 @@ def _plot_batch_improvement_heatmap(
         return None
 
     columns: list[tuple[str, str]] = [(s.key, f"{_SHORT_CURVE_LABELS.get(s.key, s.label)} {'↑' if s.higher_is_better else '↓'}") for s in metrics_present]
-    columns.append(("product", "Product ↑\n(raw)"))
+    panels = columns[:4]
 
-    n_cols = len(columns)
     n_rows_grid = len(families)
     n_diffs = len(difficulties)
-    fig_w = max(3.2 * n_cols, 10.0)
-    fig_h = max(0.45 * n_rows_grid + 1.3, 3.0)
-    fig, axes = plt.subplots(1, n_cols, figsize=(fig_w, fig_h), squeeze=False)
-    axes = axes[0]
+    fig_h = 2 * max(0.45 * n_rows_grid + 1.3, 3.0)
+    fig, axes = plt.subplots(2, 2, figsize=(11.0, fig_h), squeeze=False)
+    flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
 
     cmap = matplotlib.colormaps.get_cmap("RdBu").copy()
     cmap.set_bad(color="lightgrey")
 
-    for c_idx, (column_key, title) in enumerate(columns):
-        ax = axes[c_idx]
+    for panel_idx, (ax, (column_key, title)) in enumerate(zip(flat_axes, panels)):
         col_data = pct_by_column.get(column_key, {})
 
         grid = np.full((n_rows_grid, n_diffs), np.nan, dtype=float)
@@ -2660,13 +2706,12 @@ def _plot_batch_improvement_heatmap(
         ax.set_xticks(range(n_diffs))
         ax.set_xticklabels([_feasible_pct_label(d) for d in difficulties], fontsize=10.5)
         ax.set_yticks(range(n_rows_grid))
-        if c_idx == 0:
+        if panel_idx % 2 == 0:
             ax.set_yticklabels([f[3] for f in families], fontsize=10.5)
         else:
-            # Every panel shares the same row order -- repeating the
-            # family/method names on every panel would waste the width
-            # freed up for larger cells without adding information, so only
-            # the leftmost panel carries them.
+            # Both panels in the left column already carry the (shared) row
+            # order -- repeating it on the right column would waste the
+            # width freed up for larger cells without adding information.
             ax.set_yticklabels([])
         ax.set_title(title, fontsize=12)
         ax.set_xlabel("Difficulty level", fontsize=11)
@@ -2687,6 +2732,9 @@ def _plot_batch_improvement_heatmap(
                 )
 
         fig.colorbar(im, ax=ax, shrink=0.7)
+
+    for ax in flat_axes[len(panels):]:
+        ax.axis("off")
 
     fig.tight_layout()
     out_path = Path(out_path)
@@ -3048,11 +3096,13 @@ def _render_synthetic_aggregate(
     # `_plot_relative_auc_by_difficulty_figure` other reports in this package
     # use) with a horizontal legend below the grid (`legend_in_corner=False`)
     # rather than the NDIG-ablation report's own inside-the-panel corner
-    # legend -- `bbox_to_anchor=(0.5, -0.1)` matches
+    # legend -- `bbox_to_anchor=(0.5, -0.02)` plus the reserved bottom
+    # `rect` margin on its `tight_layout` call matches
     # `_plot_normalized_avg_curve_figure`'s own below-figure legend spacing
     # (this synthetic pipeline's other top-level figure, rendered just below)
     # so both figures' legends sit the same visual distance under their
-    # panels' x-axis titles.
+    # panels' x-axis titles. This call also passes `fig_height=7.0` to shrink
+    # the figure vertically to match this package's other compacted plots.
     if combined:
         # Tick labels are the feasible-fraction percent (e.g. "1%" for the
         # p0_01/threshold_pct=0.01 level), not the raw key -- see
@@ -3069,7 +3119,7 @@ def _render_synthetic_aggregate(
         ok = _plot_relative_auc_by_difficulty_grid_figure(
             relative_auc_by_level, list(SYNTHETIC_METHODS), _SYNTHETIC_METHOD_STYLES,
             metrics_present_all, by_diff_path, method_labels=METHOD_ABBREVIATIONS,
-            x_axis_label="Difficulty level", legend_in_corner=False,
+            x_axis_label="Difficulty level", legend_in_corner=False, fig_height=7.0,
         )
         if ok is not None:
             paths.append(str(ok))

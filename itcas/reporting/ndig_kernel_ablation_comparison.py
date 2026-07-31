@@ -359,7 +359,7 @@ def _render_ablation_variant(
         relative_auc_by_level, methods, method_styles, metrics_present_all, by_diff_path,
         method_labels=METHOD_ABBREVIATIONS,
         x_axis_label="Difficulty level",
-        fig_height=7.0,
+        fig_width=8.0, fig_height=6.0,
     )
     if ok is not None:
         paths.append(str(ok))

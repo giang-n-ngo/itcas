@@ -1084,6 +1084,58 @@ def test_batch_improvement_comparison_heatmap():
             assert pngs[0].stat().st_size > 0
 
 
+def test_batch_improvement_heatmap_is_2x2_grid_without_product():
+    """``_plot_batch_improvement_heatmap`` must lay its (up to four) metric
+    panels out as a 2x2 grid, mirroring ``_plot_relative_auc_box_grid_figure``'s
+    convention, and must never draw a "product" panel -- the row-of-panels
+    layout (one per metric plus a trailing "product" column) is gone.
+
+    Intercepts ``matplotlib.pyplot.close`` to inspect the Figure's axes grid
+    before it's discarded, since the function doesn't return the Figure
+    itself -- same technique as
+    ``test_ndig_kernel_ablation_summary_figures_are_2x2_grids``.
+    """
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from itcas.reporting.batch_improvement_comparison import FAMILIES
+    from itcas.reporting.summary import _ordered_metrics, _plot_batch_improvement_heatmap
+
+    metrics_present = _ordered_metrics()
+    assert len(metrics_present) == 4, "fixture assumes exactly 4 registered metrics"
+
+    difficulties = ["p0_01", "p0_05", "p0_10", "p0_20"]
+    pct_by_column = {
+        spec.key: {fam[0]: {d: 10.0 for d in difficulties} for fam in FAMILIES}
+        for spec in metrics_present
+    }
+
+    captured = {}
+    real_close = __import__("matplotlib.pyplot", fromlist=["close"]).close
+
+    def fake_close(fig):
+        captured["fig"] = fig
+        return real_close(fig)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "heatmap.pdf"
+        with patch("matplotlib.pyplot.close", side_effect=fake_close):
+            result = _plot_batch_improvement_heatmap(
+                pct_by_column, FAMILIES, difficulties, metrics_present, out_path,
+            )
+        assert result is not None
+
+    fig = captured["fig"]
+    axes = fig.get_axes()
+    # imshow panels each get their own colorbar axis too, so filter down to
+    # the 4 panel axes by their titles (colorbars have no title).
+    panel_axes = [ax for ax in axes if ax.get_title()]
+    assert len(panel_axes) == 4, f"expected a 2x2 grid of 4 panels, got {len(panel_axes)}"
+    titles = [ax.get_title() for ax in panel_axes]
+    assert not any("product" in t.lower() for t in titles), f"unexpected product panel: {titles}"
+
+
 def test_ndig_comparison_relative_auc_grid():
     """Tiny fixture end-to-end check for the rewritten ``ndig_comparison.py``.
 
@@ -2629,6 +2681,7 @@ if __name__ == "__main__":
     test_sample_uniform_device_and_reproducibility()
     test_synthetic_comparison_split_pipeline_matches_monolithic()
     test_batch_improvement_comparison_heatmap()
+    test_batch_improvement_heatmap_is_2x2_grid_without_product()
     test_ndig_comparison_relative_auc_grid()
     test_run_lock_prevents_concurrent_runs()
     test_evaluate_true_matches_input_device_and_dtype()

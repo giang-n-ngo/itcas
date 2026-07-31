@@ -367,7 +367,7 @@ def plot_ratio_grid(
         fig.legend(
             list(handles_seen.values()), list(handles_seen.keys()),
             loc="lower center", ncol=min(len(methods), 6),
-            fontsize=12, bbox_to_anchor=(0.5, -0.1),
+            fontsize=12, bbox_to_anchor=(0.5, -0.02),
         )
         fig.tight_layout(rect=(0, 0.06, 1, 1))
     else:

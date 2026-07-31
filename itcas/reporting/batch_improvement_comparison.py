@@ -62,10 +62,9 @@ enormous, non-representative ratio; aggregating the raw AUCs first is robust
 to that. A cell is ``None`` (rendered as a fixed grey, not a 0%) when either
 side has no data at all, or when ``agg_seq == 0`` (the ratio is undefined).
 
-**FCFD sign flip.** Every column except FCFD is higher-is-better (including
-the synthetic ``"product"`` column, always higher-is-better by construction),
-so its raw percentage change already means "positive = batch improved".
-FCFD is the one lower-is-better metric (:class:`MetricSpec` with
+**FCFD sign flip.** Every column except FCFD is higher-is-better, so its raw
+percentage change already means "positive = batch improved". FCFD is the one
+lower-is-better metric (:class:`MetricSpec` with
 ``higher_is_better=False``), so its raw percentage change is negated before
 plotting -- exactly the sign-flip convention every other figure in this
 package already applies for FCFD (see
@@ -226,8 +225,9 @@ def summarize_batch_improvement_comparison(
     if not metrics_present:
         return []
 
+    # No "product" column here -- the heatmap is a 2x2 grid of the four
+    # registered metrics only, see _plot_batch_improvement_heatmap.
     metric_higher_is_better = {s.key: s.higher_is_better for s in metrics_present}
-    metric_higher_is_better["product"] = True  # always higher-is-better by construction
 
     pct_by_column = _pct_change_by_column(mean_auc_by_diff, metric_higher_is_better)
 

@@ -12,3 +12,4 @@ itcas/reporting/__pycache__/
 itcas/utils/__pycache__/
 test/__pycache__/
 *.pyc
+aaai_supplementary/
