@@ -30,6 +30,12 @@ and :mod:`itcas.reporting.summary`'s synthetic-comparison pipeline) build on:
   curve, bucketed by ``{problem: {difficulty: {method: [auc, ...]}}}``, used
   by ``ff_comparison.py``/``casd_comparison.py``/``summary.py``'s synthetic
   pipeline for their own Friedman/Wilcoxon dominance tests.
+* :func:`build_stats_report` -- thin wrapper around
+  :func:`_collect_product_auc_for_stats` +
+  :func:`itcas.reporting.stats.run_stats` for the common "single real-world
+  problem, one proposed method vs N baselines, evals axis" case; shared
+  verbatim by ``ff_comparison.py`` and ``casd_comparison.py`` (previously two
+  byte-identical copies).
 
 **Evaluations, not steps, is the correct shared axis** whenever a report here
 compares a method's own sequential and batch variants (as opposed to
@@ -52,6 +58,7 @@ from pathlib import Path
 from typing import Optional
 
 from .metrics import RunSeries
+from .stats import StatsReport, run_stats
 from .summary import (
     CurveCache,
     _SHORT_CURVE_LABELS,
@@ -495,3 +502,35 @@ def _collect_product_auc_for_stats(
                 continue
             out.setdefault(problem, {}).setdefault(diff, {}).setdefault(run.method, []).append(auc)
     return out
+
+
+def build_stats_report(
+    runs: list[RunSeries],
+    cache: CurveCache,
+    *,
+    problem: str,
+    proposed_method: str,
+    axis: str = _AXIS,
+    alpha: float = 0.05,
+) -> StatsReport:
+    """Friedman-gated, Holm-corrected pairwise Wilcoxon: ``proposed_method`` vs every other method in ``runs``.
+
+    Shared by ``ff_comparison.py`` and ``casd_comparison.py`` (previously two
+    byte-identical ``build_stats_report`` copies, one per module, differing
+    only in which module-level constants -- ``_PROBLEM``, ``PROPOSED_METHOD``,
+    ``_AXIS`` -- they closed over).
+
+    Reuses :func:`_collect_product_auc_for_stats` (generic over any method
+    set) to get per-seed product-curve AUCs for a single ``problem``, then
+    :func:`itcas.reporting.stats.run_stats` with the given
+    ``proposed_method`` -- already generic over any number of baselines,
+    pairwise tests are automatically restricted to proposed-vs-baseline
+    (never baseline-vs-baseline), Holm-Bonferroni corrected over the
+    baselines present.
+    """
+    auc_by_problem = _collect_product_auc_for_stats({problem: runs}, {problem: cache})
+    # run_stats expects {problem: {axis: {difficulty: {method: [...]}}}};
+    # _collect_product_auc_for_stats already restricts to the evals axis (see
+    # module docstring) but doesn't nest an axis key, so add it here.
+    data = {p: {axis: diffs} for p, diffs in auc_by_problem.items()}
+    return run_stats(data, proposed_method=proposed_method, alpha=alpha)

@@ -193,13 +193,14 @@ from typing import Optional
 from . import ranking
 from .batch_vs_sequential import (
     _collect_family_runs,
-    _collect_product_auc_for_stats,
     _rows_by_difficulty,
+    build_stats_report,
     plot_group_grid,
 )
 from .method_labels import METHOD_ABBREVIATIONS
 from .metrics import RunSeries
-from .stats import StatsReport, _fmt, _sig_marker, report_to_json, run_stats
+from .stats import StatsReport, _fmt, _sig_marker
+from .stats import write_stats_report as _write_stats_report
 from .summary import (
     CurveCache,
     _metrics_present_in_rows,
@@ -465,26 +466,9 @@ def summarize_plots(
 # ---------------------------------------------------------------------------
 # Statistics
 # ---------------------------------------------------------------------------
-def build_stats_report(
-    runs: list[RunSeries],
-    cache: CurveCache,
-    alpha: float = 0.05,
-) -> StatsReport:
-    """Friedman-gated, Holm-corrected pairwise Wilcoxon: ``itcas_ndig`` vs each of 5 baselines.
-
-    Reuses :func:`itcas.reporting.batch_vs_sequential._collect_product_auc_for_stats`
-    (generic over any method set) to get per-seed product-curve AUCs, then
-    :func:`itcas.reporting.stats.run_stats` with ``proposed_method=PROPOSED_METHOD``
-    -- already generic over any number of baselines, pairwise tests are
-    automatically restricted to proposed-vs-baseline (never
-    baseline-vs-baseline), Holm-Bonferroni corrected over the five baselines.
-    """
-    auc_by_problem = _collect_product_auc_for_stats({_PROBLEM: runs}, {_PROBLEM: cache})
-    # run_stats expects {problem: {axis: {difficulty: {method: [...]}}}};
-    # _collect_product_auc_for_stats already restricts to the evals axis (see
-    # its docstring) but doesn't nest an axis key, so add it here.
-    data = {problem: {_AXIS: diffs} for problem, diffs in auc_by_problem.items()}
-    return run_stats(data, proposed_method=PROPOSED_METHOD, alpha=alpha)
+# build_stats_report itself now lives in batch_vs_sequential.py (shared,
+# byte-identical to casd_comparison.py's former copy save for which module
+# constants it closed over) -- see the imported `build_stats_report`.
 
 
 def _report_to_markdown(report: StatsReport) -> str:
@@ -576,13 +560,17 @@ def _report_to_markdown(report: StatsReport) -> str:
 
 
 def write_stats_report(report: StatsReport, out_dir: Path) -> tuple[Path, Path]:
-    """Write ``ff_comparison_stats_report.{json,md}`` to ``out_dir``."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = out_dir / "ff_comparison_stats_report.json"
-    md_path = out_dir / "ff_comparison_stats_report.md"
-    json_path.write_text(report_to_json(report), encoding="utf-8")
-    md_path.write_text(_report_to_markdown(report), encoding="utf-8")
-    return json_path, md_path
+    """Write ``ff_comparison_stats_report.{json,md}`` to ``out_dir``.
+
+    Thin wrapper around :func:`itcas.reporting.stats.write_stats_report`
+    (JSON write + directory handling), passing this module's own
+    :func:`_report_to_markdown` since ``stats.report_to_markdown``'s prose
+    assumes the opposite ("lower is better") direction -- see module
+    docstring's "Statistics" section.
+    """
+    return _write_stats_report(
+        report, out_dir, stem="ff_comparison_stats_report", markdown_fn=_report_to_markdown
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +595,9 @@ def summarize_ff_comparison(
 
     paths, runs, cache = summarize_plots(input_dir, out_dir, auc_cache_dir=resolved_auc_cache_dir)
 
-    report = build_stats_report(runs, cache, alpha=alpha)
+    report = build_stats_report(
+        runs, cache, problem=_PROBLEM, proposed_method=PROPOSED_METHOD, axis=_AXIS, alpha=alpha
+    )
     json_p, md_p = write_stats_report(report, out_dir)
     paths.extend([str(json_p), str(md_p)])
 

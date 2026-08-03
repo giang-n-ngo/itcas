@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -518,8 +518,17 @@ def write_stats_report(
     report: StatsReport,
     out_dir: Path,
     stem: str = "stats_report",
+    *,
+    markdown_fn: Callable[[StatsReport], str] = report_to_markdown,
 ) -> tuple[Path, Path]:
     """Write ``<stem>.json`` and ``<stem>.md`` to ``out_dir``.
+
+    ``markdown_fn`` renders the Markdown body and defaults to
+    :func:`report_to_markdown`; callers whose report needs a different
+    Markdown layout (e.g. a per-baseline column table assuming a different
+    "higher/lower is better" direction, see ``ff_comparison.py`` /
+    ``casd_comparison.py``) can pass their own renderer while still reusing
+    this function for the JSON write + directory handling.
 
     Returns ``(json_path, md_path)``.
     """
@@ -527,7 +536,7 @@ def write_stats_report(
     json_path = out_dir / f"{stem}.json"
     md_path = out_dir / f"{stem}.md"
     json_path.write_text(report_to_json(report), encoding="utf-8")
-    md_path.write_text(report_to_markdown(report), encoding="utf-8")
+    md_path.write_text(markdown_fn(report), encoding="utf-8")
     return json_path, md_path
 
 
