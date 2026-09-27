@@ -1,0 +1,10 @@
+{
+    "_comment": "Curated method list for scripts/check_completion.sh's --methods flag, scoped to the reviewer-requested NDIG-B acquisition-*component* ablation sweep (itcas/reporting/ndig_b_component_ablation_comparison.py) -- kept separate from configs/final_methods.json (the main paper/writeup comparison) the same way the earlier QD-DPP kernel ablations are, rather than folded into that curated list. Usage: bash scripts/check_completion.sh results/sweep 20 --methods configs/ndig_b_component_ablation_methods.json",
+    "methods": [
+        "itcas/ndig",
+        "itcas/ndig_no_infogain",
+        "itcas/edig",
+        "itcas/efig",
+        "itcas/ndig_pof_entropy"
+    ]
+}
