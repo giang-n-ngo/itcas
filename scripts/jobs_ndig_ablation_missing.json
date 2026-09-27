@@ -1,0 +1,232 @@
+{
+  "_comment": "Missing/partial synthetic runs for the NDIG-B component ablations (itcas/ndig_no_infogain, itcas/ndig_pof_entropy) as of 2026-09-28; seeds are exactly the ones without a .summary.json. Real-world problems excluded.",
+  "defaults": {
+    "experiments_path": "configs/experiments.json",
+    "thresholds_path": "configs/thresholds.json",
+    "results_root": "results/sweep",
+    "device": "cuda",
+    "n_concurrent": 8
+  },
+  "jobs": {
+    "separate": [
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "schwefel_styblinski_sphere_20d",
+        "difficulty": 0.1,
+        "seeds": "17-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "schwefel_styblinski_sphere_20d",
+        "difficulty": 0.2,
+        "seeds": "16-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "styblinski_tang_6d",
+        "difficulty": 0.1,
+        "seeds": "16-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "styblinski_tang_6d",
+        "difficulty": 0.2,
+        "seeds": "8-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "rastrigin_griewank_sphere_20d",
+        "difficulty": 0.01,
+        "seeds": "8-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "rastrigin_griewank_sphere_20d",
+        "difficulty": 0.05,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "rastrigin_griewank_sphere_20d",
+        "difficulty": 0.1,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "rastrigin_griewank_sphere_20d",
+        "difficulty": 0.2,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "styblinski_tang_levy_10d",
+        "difficulty": 0.01,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "styblinski_tang_levy_10d",
+        "difficulty": 0.05,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "styblinski_tang_levy_10d",
+        "difficulty": 0.1,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "styblinski_tang_levy_10d",
+        "difficulty": 0.2,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "zdt3_6d",
+        "difficulty": 0.01,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "zdt3_6d",
+        "difficulty": 0.05,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "zdt3_6d",
+        "difficulty": 0.1,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_no_infogain",
+        "problem": "zdt3_6d",
+        "difficulty": 0.2,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "schwefel_styblinski_sphere_20d",
+        "difficulty": 0.2,
+        "seeds": "16-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "styblinski_tang_6d",
+        "difficulty": 0.1,
+        "seeds": "16-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "styblinski_tang_6d",
+        "difficulty": 0.2,
+        "seeds": "8-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "rastrigin_griewank_sphere_20d",
+        "difficulty": 0.01,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "rastrigin_griewank_sphere_20d",
+        "difficulty": 0.05,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "rastrigin_griewank_sphere_20d",
+        "difficulty": 0.1,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "rastrigin_griewank_sphere_20d",
+        "difficulty": 0.2,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "styblinski_tang_levy_10d",
+        "difficulty": 0.01,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "styblinski_tang_levy_10d",
+        "difficulty": 0.05,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "styblinski_tang_levy_10d",
+        "difficulty": 0.1,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "styblinski_tang_levy_10d",
+        "difficulty": 0.2,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "zdt3_6d",
+        "difficulty": 0.01,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "zdt3_6d",
+        "difficulty": 0.05,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "zdt3_6d",
+        "difficulty": 0.1,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      },
+      {
+        "method": "itcas/ndig_pof_entropy",
+        "problem": "zdt3_6d",
+        "difficulty": 0.2,
+        "seeds": "0-19",
+        "n_concurrent": 4
+      }
+    ],
+    "group": []
+  }
+}
