@@ -82,6 +82,13 @@ def parse_args(argv=None) -> tuple[ExperimentConfig, str]:
              "'efig' (PoF-weighted info gain), "
              "'edig' (depth-weighted info gain, resolves EFIG saturation/cold-start), or "
              "'ndig' (rationally-squashed depth-weighted info gain, restores DPP context diversity). "
+             "NDIG-B component ablations (reviewer-requested; see "
+             "reporting/ndig_b_component_ablation_comparison.py): 'edig' and 'efig' "
+             "double as the 'remove depth normalization' and 'PoF times info gain' "
+             "ablations of NDIG-B unchanged; 'ndig_no_infogain' (NDIG's normalized "
+             "depth term alone, no info-gain multiplier) and 'ndig_pof_entropy' "
+             "(binary entropy of the joint PoF, no depth/info-gain term at all) "
+             "are the other two. "
              "Only applies to --method itcas; the Family-B continuous baselines "
              "('c2lse'/'bes' and their '_batch' siblings) always use their own "
              "fixed quality variant of the same name and ignore this flag.",

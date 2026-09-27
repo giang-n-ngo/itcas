@@ -17,12 +17,14 @@ this module always compares the same fixed 3-method set within a single
 family (:data:`METHODS`), so there is no ``group`` parameter to plumb through.
 Otherwise it reuses that module's scope decisions verbatim:
 
-* **Two output pairs, each a 2x2 grid** -- relative-AUC-by-difficulty and
+* **Two output pairs, each a metric grid** -- relative-AUC-by-difficulty and
   normalized average curve (see :func:`_render_ablation_aggregate`), each
-  laid out as a 2x2 grid of the 4 metrics (via
+  laid out as a near-square grid of every registered metric (via
   :func:`itcas.reporting.summary._plot_relative_auc_by_difficulty_grid_figure`/
-  :func:`itcas.reporting.summary._plot_normalized_avg_curve_grid_figure`,
-  the 2x2-grid siblings of the one-row figures every other report in this
+  :func:`itcas.reporting.summary._plot_normalized_avg_curve_grid_figure` and
+  :func:`itcas.reporting.summary._grid_shape` -- a 2x2 grid when there are
+  four registered metrics, growing automatically as more are added; these
+  are the grid siblings of the one-row figures every other report in this
   package uses) rather than one wide row -- no per-problem plot, no
   relative-AUC-vs-evaluations boxplot, no avg-rank boxplot, no
   Friedman/Wilcoxon stats report. This mirrors
@@ -315,10 +317,11 @@ def _render_ablation_variant(
     """Render one variant's pair of cross-problem outputs (shared by both calls in
     :func:`_render_ablation_aggregate`).
 
-    Writes, restricted to ``methods``, each as a 2x2 grid of the 4 metrics
-    (no product panel -- see
+    Writes, restricted to ``methods``, each as a near-square grid of every
+    registered metric (no product panel -- see
+    :func:`itcas.reporting.summary._grid_shape` and
     :func:`itcas.reporting.summary._plot_relative_auc_box_grid_figure`'s
-    docstring for why a 2x2 layout has no room for a fifth panel):
+    docstring):
 
     * ``<out_dir>/ndig_kernel_ablation_relative_auc_by_difficulty<filename_suffix>.pdf``
       -- one line + IQR band per method spanning every difficulty (see

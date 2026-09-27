@@ -13,6 +13,13 @@ The C-MO-CAS evaluation suite consists of exactly five metrics:
 5. **Number of Positives** — cumulative count of feasible ``(x, c)`` queries.
 6. **Area Under the Positives Curve (AUP)** — ``sum_t P(t)``; a single number.
 
+Additionally, **Localized (Context-Conditioned) Feasible Convex Hull Volume**
+(`localized_feasible_convex_hull_volume`, `contexts/metrics.md` §6) partitions
+the context space into ``K`` regions (via K-means on *all* evaluated contexts)
+and averages the per-region FCHV over the nominal ``K`` regions, penalising
+algorithms that concentrate objective-space diversity in a single context
+region while leaving the rest of the context space unexplored.
+
 A "positive"/feasible sample satisfies ``f_i(x, c) >= tau_i`` for every objective
 ``i``. Fill distances are *lower-is-better*; FCHV and ε-Archive Size are
 *higher-is-better*.
@@ -178,3 +185,146 @@ def epsilon_archive_size(
             if float(dists.min().item()) >= eps:
                 archive.append(y)
     return len(archive)
+
+
+# Nominal number of K-means context regions used as the shared default `k`
+# for `localized_feasible_convex_hull_volume` by both
+# `itcas.reporting.metrics.localized_feasible_convex_hull_volume_curve` (the
+# plotted per-run curve) and `itcas.pipeline.loop.run_experiment`'s live
+# final-value summary -- defined here, in the core stateless metrics module
+# (rather than in `itcas.reporting.metrics`, where the curve wrapper lives),
+# so both of those modules -- one of which (`itcas.pipeline.loop`) sits
+# "below" `itcas.reporting` in the package's own import graph -- can import
+# it without creating a cycle. There is no per-(problem, difficulty)
+# calibration pipeline for this value analogous to `eps_archive`'s
+# `tune_eps_archive` (see `itcas.reporting.metrics.eps_archive_used`), so a
+# single fixed default is used everywhere: 8 regions is coarse enough to
+# stay meaningful under realistic per-trial query budgets (tens to a few
+# hundred points) even for the higher-context-dimensionality registered
+# problems (e.g. `multimodal_trap_20d`, `dtlz4_12d`), while still fine
+# enough to distinguish "spread across the context space" from
+# "concentrated in one corner".
+LOCALIZED_FCHV_K = 8
+
+
+def localized_feasible_convex_hull_volume(
+    feasible_Y: torch.Tensor,
+    feasible_contexts: torch.Tensor,
+    all_contexts: torch.Tensor,
+    *,
+    k: int,
+    seed: int = 0,
+) -> float:
+    """Localized (context-conditioned) FCHV per `contexts/metrics.md` §6.
+
+    Partitions the *context* space into ``k`` local regions via K-means
+    (``scipy.cluster.vq.kmeans2``) fit on **every evaluated context**
+    (``all_contexts``) -- not just the feasible subset -- mirroring how a
+    predefined grid's bin edges would partition the whole context space
+    independent of feasibility. Only afterwards are the strictly-feasible
+    rows' contexts (``feasible_contexts``, already filtered by the caller to
+    the same rows as ``feasible_Y``, i.e. row ``i`` of both corresponds to
+    the same evaluated tuple) assigned to their nearest centroid
+    (``scipy.cluster.vq.vq``) to group ``feasible_Y`` per region. Each
+    region's convex-hull volume is computed with
+    :func:`feasible_convex_hull_volume` (``0.0`` if that region has fewer
+    than ``m + 1`` non-coplanar feasible points, exactly the global FCHV's
+    rule, reused verbatim here).
+
+    The final scalar is the mean over the *nominal* ``k`` regions
+    (``sum_k V_k / k``): an empty or degenerate region contributes ``0`` to
+    the sum but the denominator is always ``k``, never the count of
+    non-empty regions -- an algorithm that only explores one context region
+    cannot inflate this score by concentrating all its diversity there.
+
+    Edge cases (each returns ``0.0`` rather than raising, since one trial's
+    degenerate partition should never crash a whole batch's summary
+    computation, mirroring :func:`feasible_convex_hull_volume`'s own
+    ``try/except Exception: return 0.0`` around ``ConvexHull``):
+
+    * ``k <= 0`` -> ``0.0`` (no regions requested).
+    * ``all_contexts`` is empty (nothing evaluated yet) -> ``0.0``.
+    * ``feasible_Y`` / ``feasible_contexts`` is empty (no feasible points to
+      place) -> ``0.0``.
+    * Fewer evaluated points than ``k`` -- ``kmeans2`` requires
+      ``n_points >= n_clusters`` -- the *effective* cluster count used to fit
+      the partition is clamped to ``min(k, n_eval)``, but the sum is still
+      divided by the nominal ``k`` (the "missing" ``k - n_eval`` regions
+      contribute ``0``, same as any other empty/degenerate region).
+    * ``kmeans2``/``vq`` raising (e.g. malformed input) is caught and treated
+      as a fully degenerate ("all regions empty") partition, i.e. ``0.0``.
+      ``kmeans2``'s own *warning* (not exception) on an empty cluster during
+      iteration is suppressed rather than propagated -- it does not indicate
+      failure (the empty cluster's centroid simply keeps its previous
+      position; see ``scipy.cluster.vq.kmeans2`` source), so surfacing it
+      here would just be per-trial log noise across a large batch of runs.
+
+    ``seed`` makes the K-means fit (and hence this metric) deterministic; it
+    is passed straight through to ``kmeans2``'s own ``seed=`` kwarg. Per that
+    function's docstring, an ``int`` seed spins up a fresh
+    ``numpy.random.RandomState`` internal to the call, so this never reads or
+    mutates global NumPy RNG state. Initialisation uses ``minit="points"``
+    (centroids are a random subset of the actual evaluated contexts) rather
+    than the default ``"random"`` (Gaussian-moment-matched centroids), since
+    the latter needs a well-defined per-dimension variance and can misbehave
+    on tiny/duplicate-heavy context sets (e.g. a single evaluated point, or
+    many repeated contexts) -- exactly the small-``n_eval`` edge cases this
+    function must handle gracefully.
+    """
+    if k <= 0:
+        return 0.0
+    if all_contexts.numel() == 0:
+        return 0.0
+    if feasible_Y.numel() == 0 or feasible_contexts.numel() == 0:
+        return 0.0
+    if feasible_Y.ndim != 2:
+        raise ValueError(f"feasible_Y must be 2D, got shape {tuple(feasible_Y.shape)}")
+    if feasible_contexts.ndim != 2:
+        raise ValueError(
+            f"feasible_contexts must be 2D, got shape {tuple(feasible_contexts.shape)}"
+        )
+    if feasible_contexts.shape[0] != feasible_Y.shape[0]:
+        raise ValueError(
+            "feasible_contexts and feasible_Y must have the same number of rows "
+            f"(got {feasible_contexts.shape[0]} vs {feasible_Y.shape[0]})"
+        )
+
+    import warnings
+
+    try:
+        from scipy.cluster.vq import kmeans2, vq
+    except ImportError as exc:  # pragma: no cover - environment issue
+        raise ImportError(
+            "scipy is required for localized_feasible_convex_hull_volume"
+        ) from exc
+
+    all_ctx_np = all_contexts.detach().double().cpu().numpy()
+    n_eval = int(all_ctx_np.shape[0])
+    effective_k = min(int(k), n_eval)
+    if effective_k < 1:
+        return 0.0
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            centroids, _ = kmeans2(
+                all_ctx_np, effective_k, minit="points", seed=int(seed)
+            )
+    except Exception:
+        return 0.0
+
+    feas_ctx_np = feasible_contexts.detach().double().cpu().numpy()
+    try:
+        labels, _ = vq(feas_ctx_np, centroids)
+    except Exception:
+        return 0.0
+
+    Y = feasible_Y.detach().double()
+    total = 0.0
+    for region in range(effective_k):
+        mask = labels == region
+        if not mask.any():
+            continue
+        Y_region = Y[torch.from_numpy(mask)]
+        total += feasible_convex_hull_volume(Y_region)
+    return total / float(k)

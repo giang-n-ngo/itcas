@@ -13,7 +13,7 @@ Output structure (one PDF per ``problem`` per axis):
 Each PDF contains one subplot row per difficulty (e.g. ``p0_05``,
 ``p0_10``...) and one column per metric:
 
-    [ #pos | FCFD | FCHV | ε-Archive | hypervolume ]
+    [ #pos | FCFD | FCHV | ε-Archive | Cond. FCHV | hypervolume ]
 
 * x-axis: metric value (area). y-axis: method names.
 * Each subplot stacks horizontal boxplots, one per method, summarising the
@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import math
 import re
 from pathlib import Path
 from statistics import median
@@ -142,6 +143,7 @@ def _short_metric_label(spec: MetricSpec) -> str:
         "feasible_context_fill_distance": "FCFD (area)",
         "feasible_convex_hull_volume": "FCHV (area)",
         "epsilon_archive_size": "ε-Archive Size (area)",
+        "localized_feasible_convex_hull_volume": "Cond. FCHV (area)",
     }
     return short.get(spec.key, spec.label)
 
@@ -695,6 +697,7 @@ _SHORT_CURVE_LABELS: dict[str, str] = {
     "feasible_context_fill_distance": "FCFD",
     "feasible_convex_hull_volume": "FCHV",
     "epsilon_archive_size": "ε-Archive Size",
+    "localized_feasible_convex_hull_volume": "Cond. FCHV",
 }
 
 
@@ -1588,6 +1591,29 @@ def _plot_relative_auc_box_figure(
     return out_path
 
 
+def _grid_shape(n_panels: int) -> tuple[int, int]:
+    """``(nrows, ncols)`` for a near-square grid of ``n_panels`` panels.
+
+    Used by every "standalone NxM-grid" sibling figure below
+    (:func:`_plot_relative_auc_box_grid_figure`,
+    :func:`_plot_relative_auc_by_difficulty_grid_figure`,
+    :func:`_plot_normalized_avg_curve_grid_figure`) so the grid always fits
+    exactly ``len(metrics_present)`` panels instead of a figure hardcoded to
+    a 2x2 layout that silently drops any 5th+ registered metric. ``ncols =
+    ceil(sqrt(n_panels))``, ``nrows = ceil(n_panels / ncols)`` -- e.g. ``n=4``
+    -> ``(2, 2)`` (this package's 2x2 layout before a 5th metric existed,
+    preserved exactly), ``n=5`` -> ``(2, 3)`` (one blank cell, wider than
+    tall), ``n=1`` -> ``(1, 1)``. ``n_panels <= 0`` returns ``(1, 1)`` (the
+    caller is expected to have already returned ``None`` for an empty
+    ``metrics_present`` before reaching here; this is just a safe floor).
+    """
+    if n_panels <= 0:
+        return (1, 1)
+    ncols = math.ceil(math.sqrt(n_panels))
+    nrows = math.ceil(n_panels / ncols)
+    return (nrows, ncols)
+
+
 def _plot_relative_auc_box_grid_figure(
     relative_auc_lists: dict[str, dict[str, list[float]]],
     methods: list[str],
@@ -1596,32 +1622,29 @@ def _plot_relative_auc_box_grid_figure(
     out_path: str | Path,
     method_labels: Optional[dict[str, str]] = None,
 ) -> Optional[Path]:
-    """Standalone 2x2-grid boxplot figure: relative-AUC ratio distribution, one panel per metric.
+    """Standalone grid boxplot figure: relative-AUC ratio distribution, one panel per metric.
 
-    A 2x2-grid sibling of :func:`_plot_relative_auc_box_figure`: same
+    A grid-of-panels sibling of :func:`_plot_relative_auc_box_figure`: same
     per-panel content (:func:`_draw_metric_box_panel`, same
     ``ascending_is_better``/``reference_line=1.0`` conventions, same
     ``ranking.relative_auc_ratio_lists_over_rows`` input shape and "ratio"
-    definition), but laid out as a 2x2 grid of the (exactly four)
-    :class:`MetricSpec`\\ s in ``metrics_present`` instead of one wide row --
-    and, unlike that figure, never draws a **product** panel (there is no
-    fifth panel to place in a 2x2 grid, and the product column has no
-    ``MetricSpec``/direction of its own to plot alongside four fixed metric
-    panels here).
-
-    Panels are filled row-major (``metrics_present[0]`` top-left,
-    ``metrics_present[1]`` top-right, ``metrics_present[2]`` bottom-left,
-    ``metrics_present[3]`` bottom-right); any panel beyond the fourth is
-    silently dropped and any short of four leaves the remaining grid cell(s)
-    blank (axis turned off) rather than crashing, so this still degrades
-    gracefully if a metric is ever absent from the data.
+    definition), but laid out as a near-square grid (:func:`_grid_shape`) of
+    every :class:`MetricSpec` in ``metrics_present`` instead of one wide row
+    -- and, unlike that figure, never draws a **product** panel (the
+    product column has no ``MetricSpec``/direction of its own to plot
+    alongside the fixed metric panels here). Sized to fit exactly
+    ``len(metrics_present)`` panels (``(2, 2)`` for the four core metrics,
+    growing automatically if more are ever registered); any short of a full
+    grid leaves the remaining cell(s) blank (axis turned off) rather than
+    crashing, so this still degrades gracefully if a metric is ever absent
+    from the data.
 
     Unlike :func:`_plot_relative_auc_box_figure`, each panel's boxes are
     drawn in ``methods``' own given order (top-to-bottom, not sorted by
     mean -- ``sort_by_mean=False``) and carry no per-panel y-tick labels
-    (``show_labels=False``): the same two methods repeat in every one of the
-    four panels, so their names are shown once, via a single shared legend
-    below the grid, instead of four times.
+    (``show_labels=False``): the same methods repeat in every panel, so
+    their names are shown once, via a single shared legend below the grid,
+    instead of once per panel.
     """
     import matplotlib
 
@@ -1633,9 +1656,10 @@ def _plot_relative_auc_box_grid_figure(
     if not metrics_present:
         return None
 
-    panels = metrics_present[:4]
-    fig, axes = plt.subplots(2, 2, figsize=(11.0, 8.0), squeeze=False)
-    flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
+    panels = metrics_present
+    nrows, ncols = _grid_shape(len(panels))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 4.0 * nrows), squeeze=False)
+    flat_axes = list(axes.flat)
 
     for ax, spec in zip(flat_axes, panels):
         _draw_metric_box_panel(
@@ -1879,36 +1903,33 @@ def _plot_relative_auc_by_difficulty_grid_figure(
     fig_width: float = 9.0,
     fig_height: float = 9.0,
 ) -> Optional[Path]:
-    """Standalone 2x2-grid line-plot figure: relative-AUC ratio (+ IQR band) per metric, across difficulty.
+    """Standalone grid line-plot figure: relative-AUC ratio (+ IQR band) per metric, across difficulty.
 
-    A 2x2-grid sibling of :func:`_plot_relative_auc_by_difficulty_figure`: same
-    per-panel content (:func:`_draw_metric_line_panel`, same line + shaded
-    IQR-band convention, same ``y=1.0`` reference line, same per-panel
-    categorical difficulty x-ticks), but laid out as a 2x2 grid of the
-    (exactly four) :class:`MetricSpec`\\ s in ``metrics_present`` instead of
-    one wide row -- mirroring :func:`_plot_relative_auc_box_grid_figure`'s own
-    2x2 layout choice for the same reason: this never draws a **product**
-    panel either (there is no fifth panel to place in a 2x2 grid, and the
+    A grid-of-panels sibling of :func:`_plot_relative_auc_by_difficulty_figure`:
+    same per-panel content (:func:`_draw_metric_line_panel`, same line +
+    shaded IQR-band convention, same ``y=1.0`` reference line, same
+    per-panel categorical difficulty x-ticks), but laid out as a near-square
+    grid (:func:`_grid_shape`) of every :class:`MetricSpec` in
+    ``metrics_present`` instead of one wide row -- mirroring
+    :func:`_plot_relative_auc_box_grid_figure`'s own grid layout choice for
+    the same reason: this never draws a **product** panel either (the
     product column has no ``MetricSpec``/direction of its own to plot
-    alongside four fixed metric panels here).
+    alongside the fixed metric panels here).
 
-    Panels are filled row-major (``metrics_present[0]`` top-left,
-    ``metrics_present[1]`` top-right, ``metrics_present[2]`` bottom-left,
-    ``metrics_present[3]`` bottom-right); any panel beyond the fourth is
-    silently dropped and any short of four leaves the remaining grid cell(s)
-    blank (axis turned off) rather than crashing. Each panel is forced
-    **square** (``ax.set_box_aspect(1)``) regardless of the figure's own
-    aspect ratio.
+    Sized to fit exactly ``len(metrics_present)`` panels (``(2, 2)`` for the
+    four core metrics, growing automatically if more are ever registered);
+    panels are filled row-major and any short of a full grid leaves the
+    remaining cell(s) blank (axis turned off) rather than crashing. Each
+    panel is forced **square** (``ax.set_box_aspect(1)``) regardless of the
+    figure's own aspect ratio.
 
     One legend, shared across the whole figure, built from the first panel
-    that actually plotted a line (not unconditionally the bottom-right one --
-    a 2x2 grid panel can be the all-"(no data)" one while a later panel has
-    real lines). ``legend_in_corner`` (default ``True``, the NDIG
+    that actually plotted a line (not unconditionally the last one -- a grid
+    panel can be the all-"(no data)" one while a later panel has real
+    lines). ``legend_in_corner`` (default ``True``, the NDIG
     kernel-ablation report's own convention) draws it *inside* the last
-    populated panel (the bottom-right one in the guaranteed-4-metric case
-    this package always has), ``loc="upper right"``, single column so
-    entries stack vertically (see
-    :func:`_plot_normalized_avg_curve_grid_figure`'s sibling
+    populated panel, ``loc="upper right"``, single column so entries stack
+    vertically (see :func:`_plot_normalized_avg_curve_grid_figure`'s sibling
     ``loc="lower right"`` placement in its own panel). ``legend_in_corner=False`` (the
     synthetic-comparison report's convention) instead draws one whole-figure
     horizontal legend below the grid (``loc="lower center"``, one row,
@@ -1943,9 +1964,10 @@ def _plot_relative_auc_by_difficulty_grid_figure(
     if not metrics_present:
         return None
 
-    panels = metrics_present[:4]
-    fig, axes = plt.subplots(2, 2, figsize=(fig_width, fig_height), squeeze=False)
-    flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
+    panels = metrics_present
+    nrows, ncols = _grid_shape(len(panels))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.5 * nrows), squeeze=False)
+    flat_axes = list(axes.flat)
 
     for ax, spec in zip(flat_axes, panels):
         _draw_metric_line_panel(
@@ -2493,33 +2515,33 @@ def _plot_normalized_avg_curve_grid_figure(
     out_path: str | Path,
     method_labels: Optional[dict[str, str]] = None,
 ) -> Optional[Path]:
-    """Standalone 2x2-grid line-plot figure: normalized metric curve (+ IQR band) vs % of budget.
+    """Standalone grid line-plot figure: normalized metric curve (+ IQR band) vs % of budget.
 
-    A 2x2-grid sibling of :func:`_plot_normalized_avg_curve_figure`: same
-    per-panel content (:func:`_draw_normalized_curve_panel`, same
+    A grid-of-panels sibling of :func:`_plot_normalized_avg_curve_figure`:
+    same per-panel content (:func:`_draw_normalized_curve_panel`, same
     continuous shared ``pct_grid`` x-axis, same "% of evaluation budget"
-    x-label on every panel), but laid out as a 2x2 grid of the (exactly four)
-    :class:`MetricSpec`\\ s in ``metrics_present`` instead of one wide row --
-    mirroring :func:`_plot_relative_auc_box_grid_figure`'s/
-    :func:`_plot_relative_auc_by_difficulty_grid_figure`'s own 2x2 layout
+    x-label on every panel), but laid out as a near-square grid
+    (:func:`_grid_shape`) of every :class:`MetricSpec` in ``metrics_present``
+    instead of one wide row -- mirroring
+    :func:`_plot_relative_auc_box_grid_figure`'s/
+    :func:`_plot_relative_auc_by_difficulty_grid_figure`'s own grid layout
     choice for the same reason: this never draws a **product** panel either.
 
-    Panels are filled row-major; any panel beyond the fourth is silently
-    dropped and any short of four leaves the remaining grid cell(s) blank
-    (axis turned off) rather than crashing. Each panel is forced **square**
-    (``ax.set_box_aspect(1)``) regardless of the figure's own aspect ratio.
-    One legend, shared across the whole figure but drawn *inside* the
-    bottom-right panel (``loc="lower right"``, single column so entries
-    stack vertically) instead of a whole-figure legend below the grid --
-    built from the first panel that actually plotted a line (not
-    unconditionally the bottom-right one), but always attached to the last
-    populated panel (the bottom-right one in the guaranteed-4-metric case
-    this package always has) -- mirrors
-    :func:`_plot_relative_auc_by_difficulty_grid_figure`'s own corner-legend
-    placement (that figure uses ``"upper right"`` for its own panel; this one
-    uses ``"lower right"`` so the legend sits beside the panel's own
-    "% of evaluation budget" x-axis label instead of overlapping the top of
-    the curve).
+    Sized to fit exactly ``len(metrics_present)`` panels (``(2, 2)`` for the
+    four core metrics, growing automatically if more are ever registered);
+    panels are filled row-major and any short of a full grid leaves the
+    remaining cell(s) blank (axis turned off) rather than crashing. Each
+    panel is forced **square** (``ax.set_box_aspect(1)``) regardless of the
+    figure's own aspect ratio. One legend, shared across the whole figure
+    but drawn *inside* the last panel (``loc="lower right"``, single column
+    so entries stack vertically) instead of a whole-figure legend below the
+    grid -- built from the first panel that actually plotted a line (not
+    unconditionally the last one), but always attached to the last populated
+    panel -- mirrors :func:`_plot_relative_auc_by_difficulty_grid_figure`'s
+    own corner-legend placement (that figure uses ``"upper right"`` for its
+    own panel; this one uses ``"lower right"`` so the legend sits beside the
+    panel's own "% of evaluation budget" x-axis label instead of overlapping
+    the top of the curve).
 
     Returns ``None`` (writing nothing) when ``metrics_present`` is empty,
     the same "no metrics -> no figure" contract as every sibling
@@ -2533,9 +2555,10 @@ def _plot_normalized_avg_curve_grid_figure(
     if not metrics_present:
         return None
 
-    panels = metrics_present[:4]
-    fig, axes = plt.subplots(2, 2, figsize=(9.0, 7.0), squeeze=False)
-    flat_axes = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
+    panels = metrics_present
+    nrows, ncols = _grid_shape(len(panels))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.5 * nrows), squeeze=False)
+    flat_axes = list(axes.flat)
 
     for ax, spec in zip(flat_axes, panels):
         ok = _draw_normalized_curve_panel(
@@ -3016,9 +3039,10 @@ def _render_synthetic_aggregate(
     three per-difficulty outputs above, these two are written directly under
     ``output_dir``, not a per-difficulty subfolder:
 
-    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` (a 2x2 grid of
-      the 4 metrics, no product panel, horizontal legend below the grid --
-      see :func:`_plot_relative_auc_by_difficulty_grid_figure`). Its shaded
+    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` (a near-square
+      grid of every registered metric, no product panel, horizontal legend
+      below the grid -- see :func:`_plot_relative_auc_by_difficulty_grid_figure`).
+      Its shaded
       band shows
       spread **across problems** at each difficulty, not across seeds: a
       "row" in this split/aggregate pipeline already collapses each
@@ -3083,7 +3107,7 @@ def _render_synthetic_aggregate(
         md_path.write_text(_synthetic_report_to_markdown(report, diff), encoding="utf-8")
         paths.extend([str(json_path), str(md_path)])
 
-    # One top-level (not per-difficulty) 2x2-grid figure spanning every
+    # One top-level (not per-difficulty) grid figure spanning every
     # difficulty at once -- see _plot_relative_auc_by_difficulty_grid_figure
     # and this function's own docstring. `combined[diff]["relative_auc_lists"]`
     # is already exactly one difficulty's own {column_key: {method: [ratio,
@@ -3092,9 +3116,9 @@ def _render_synthetic_aggregate(
     # needed here; `_draw_metric_line_panel` does its own mean-point/IQR-band
     # reduction from this list. As noted in this function's docstring, the
     # resulting band shows spread across *problems*, not seeds. Laid out as a
-    # 2x2 grid of the 4 metrics (no product panel, unlike the one-row
-    # `_plot_relative_auc_by_difficulty_figure` other reports in this package
-    # use) with a horizontal legend below the grid (`legend_in_corner=False`)
+    # near-square grid of every registered metric (no product panel, unlike
+    # the one-row `_plot_relative_auc_by_difficulty_figure` other reports in
+    # this package use) with a horizontal legend below the grid (`legend_in_corner=False`)
     # rather than the NDIG-ablation report's own inside-the-panel corner
     # legend -- `bbox_to_anchor=(0.5, -0.02)` plus the reserved bottom
     # `rect` margin on its `tight_layout` call matches
@@ -3217,9 +3241,10 @@ def summarize_synthetic_comparison(
     Additionally writes one figure directly under ``<output_dir>`` (not a
     per-difficulty subfolder, since it spans every difficulty at once):
 
-    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` -- a 2x2-grid
-      line-plot sibling of the per-difficulty relative-AUC boxplot above (4
-      metric panels, no product panel, horizontal legend below the grid):
+    * ``synthetic_comparison_relative_auc_by_difficulty.pdf`` -- a near-square
+      grid line-plot sibling of the per-difficulty relative-AUC boxplot above
+      (one panel per registered metric, no product panel, horizontal legend
+      below the grid):
       instead of showing each method's ratio distribution as a box at one
       difficulty, one line per method is drawn across difficulty levels on
       the x-axis (each line point the mean of that difficulty's per-problem
@@ -3702,9 +3727,63 @@ def main(argv: Optional[list[str]] = None) -> int:
             "--output-dir. Does not require --input-dir and never reads any run logs."
         ),
     )
+    parser.add_argument(
+        "--ndig-b-component-ablation-problem", type=str, default=None,
+        dest="ndig_b_component_ablation_problem",
+        help=(
+            "Per-problem half of the split NDIG-B acquisition-component "
+            "ablation pipeline (see itcas.reporting.ndig_b_component_ablation_comparison."
+            "summarize_ndig_b_component_ablation_problem): compares the proposed "
+            "method's full batch NDIG acquisition (itcas_ndig) against four "
+            "ablations of its own quality score (itcas_ndig_no_infogain, itcas_edig, "
+            "itcas_efig, itcas_ndig_pof_entropy). Loads only this one problem's runs "
+            "and -- when --save-metrics is given -- writes "
+            "<save-metrics>/<problem>_ndig_b_component_ablation_metrics.json for a "
+            "later --ndig-b-component-ablation-aggregate-from run. Paired with "
+            "--input-dir/--save-metrics/--problems-config/--auc-cache-dir. Renders no "
+            "per-problem plot -- --output-dir is unused here."
+        ),
+    )
+    parser.add_argument(
+        "--ndig-b-component-ablation-aggregate-from", type=str, default=None,
+        dest="ndig_b_component_ablation_aggregate_from",
+        help=(
+            "Aggregate half of the split NDIG-B acquisition-component ablation "
+            "pipeline (see summarize_ndig_b_component_ablation_aggregate): loads "
+            "every *_ndig_b_component_ablation_metrics.json under this directory "
+            "(written by --ndig-b-component-ablation-problem runs) and produces the "
+            "combined relative-AUC-by-difficulty and normalized-curve figures. "
+            "Paired with --output-dir. Does not require --input-dir and never reads "
+            "any run logs."
+        ),
+    )
     args = parser.parse_args(argv)
 
     kw = dict(alpha=args.alpha)
+
+    if args.ndig_b_component_ablation_problem is not None:
+        from .ndig_b_component_ablation_comparison import summarize_ndig_b_component_ablation_problem
+
+        if args.input_dir is None:
+            parser.error("--input-dir is required for --ndig-b-component-ablation-problem")
+        paths = summarize_ndig_b_component_ablation_problem(
+            args.input_dir, args.ndig_b_component_ablation_problem,
+            problems_config=args.problems_config, output_dir=args.output_dir,
+            save_metrics_dir=args.save_metrics, auc_cache_dir=args.auc_cache_dir,
+        )
+        for p in paths:
+            print(p)
+        return 0
+
+    if args.ndig_b_component_ablation_aggregate_from is not None:
+        from .ndig_b_component_ablation_comparison import summarize_ndig_b_component_ablation_aggregate
+
+        paths = summarize_ndig_b_component_ablation_aggregate(
+            args.ndig_b_component_ablation_aggregate_from, output_dir=args.output_dir,
+        )
+        for p in paths:
+            print(p)
+        return 0
 
     if args.ndig_kernel_ablation_problem is not None:
         from .ndig_kernel_ablation_comparison import summarize_ndig_kernel_ablation_problem

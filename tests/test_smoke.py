@@ -118,6 +118,68 @@ def test_objective_diversity_metrics():
     assert epsilon_archive_size(Y[:0], thresholds=tau0) == 0
 
 
+def test_localized_feasible_convex_hull_volume_averages_per_region_hulls():
+    """Localized (context-conditioned) FCHV, `contexts/metrics.md` §6.
+
+    Two well-separated 1D context clusters (around c=0 and c=10), each with
+    its own hand-computable feasible-objective convex hull:
+      * cluster A: a right triangle (0,0),(2,0),(0,2) -> area 0.5*2*2 = 2.0.
+      * cluster B: a 4x4 axis-aligned square -> area 16.0.
+    K-means with k=2 must recover exactly this partition (clusters are 10
+    units apart, contexts within a cluster are within 0.2 of each other), so
+    the metric should equal the hand-computed mean (2.0 + 16.0) / 2 = 9.0 --
+    matching what a predefined grid with one bin per cluster would also give
+    (see the module's "Design decision" on K-means vs. a grid).
+    """
+    import torch
+    from itcas.metrics import feasible_convex_hull_volume, localized_feasible_convex_hull_volume
+
+    ctx_a = torch.tensor([[0.0], [0.0], [0.0], [0.1], [0.2]], dtype=torch.double)
+    ctx_b = torch.tensor([[10.0], [10.0], [10.0], [10.1], [10.2]], dtype=torch.double)
+    all_contexts = torch.cat([ctx_a, ctx_b], dim=0)
+
+    Y_a = torch.tensor([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]], dtype=torch.double)
+    Y_b = torch.tensor([[0.0, 0.0], [4.0, 0.0], [0.0, 4.0], [4.0, 4.0]], dtype=torch.double)
+    feasible_Y = torch.cat([Y_a, Y_b], dim=0)
+    feasible_contexts = torch.cat([ctx_a[:3], ctx_b[:4]], dim=0)
+
+    v_a = feasible_convex_hull_volume(Y_a)
+    v_b = feasible_convex_hull_volume(Y_b)
+    assert v_a == 2.0 and v_b == 16.0
+
+    result = localized_feasible_convex_hull_volume(
+        feasible_Y, feasible_contexts, all_contexts, k=2, seed=0,
+    )
+    assert result == (v_a + v_b) / 2.0
+
+    # k > n_eval: kmeans2 requires n_points >= n_clusters, so the effective
+    # cluster count clamps to n_eval -- but the sum must still divide by the
+    # *nominal* k=8, not the clamped/effective count, per the metric's own
+    # "average over the nominal K" rule (contexts/metrics.md §6 Step 5). A
+    # single evaluated point/feasible point can't form an (m=2)-dim hull
+    # anyway (needs >= m+1 = 3 points), so every one of the 8 nominal
+    # regions contributes 0 regardless of the clamp -- this only tests that
+    # clamping doesn't crash and the divisor is still the nominal k.
+    small_all = torch.tensor([[0.0], [1.0]], dtype=torch.double)
+    small_feas_ctx = torch.tensor([[0.0]], dtype=torch.double)
+    small_feas_Y = torch.tensor([[0.0, 0.0]], dtype=torch.double)
+    result_clamped = localized_feasible_convex_hull_volume(
+        small_feas_Y, small_feas_ctx, small_all, k=8, seed=0,
+    )
+    assert result_clamped == 0.0
+
+    # Edge cases that must return 0.0 rather than raise.
+    empty_2d = torch.zeros(0, 2, dtype=torch.double)
+    empty_1d = torch.zeros(0, 1, dtype=torch.double)
+    assert localized_feasible_convex_hull_volume(empty_2d, empty_1d, empty_1d, k=4) == 0.0
+    assert localized_feasible_convex_hull_volume(
+        empty_2d, empty_1d, all_contexts, k=4,
+    ) == 0.0  # no feasible points, but contexts were evaluated
+    assert localized_feasible_convex_hull_volume(
+        feasible_Y, feasible_contexts, all_contexts, k=0,
+    ) == 0.0  # k <= 0
+
+
 def test_epsilon_archive_size_uses_transformed_not_raw_distance():
     """Regression test for the unit-consistency bug: skipping the log1p(y -
     thresholds) transform makes eps-Archive Size collapse onto Number of
@@ -910,8 +972,20 @@ def test_visualization_writes_per_metric_pdfs():
         )
 
         out = visualize_benchmark(root, benchmark="sphere2_6d")
-        # Two PDFs (vs_evaluations + vs_steps) per metric in REGISTRY.
-        assert len(out) >= 2 * len(METRIC_REGISTRY) - 4, out  # allow grid metrics to skip
+        # Two PDFs (vs_evaluations + vs_steps) per metric in REGISTRY. The
+        # "-4" slack tolerates up to two whole metrics' worth of PDFs (4)
+        # silently skipping -- sized to the number of ``needs_context=True``
+        # metrics that could plausibly all skip together if this fixture's
+        # ``context_dims``/reference-set plumbing were ever unavailable
+        # (``feasible_context_fill_distance`` and, since the Localized FCHV
+        # metric (`contexts/metrics.md` §6) was added,
+        # ``localized_feasible_convex_hull_volume`` -- both `needs_context`).
+        # This fixture's ``sphere2_6d`` run *does* have ``context_dims``
+        # populated, so in practice nothing skips and ``len(out) ==
+        # 2 * len(METRIC_REGISTRY)`` (10 with the current 5 registered
+        # metrics) -- verified directly, not just asserted loosely.
+        assert len(out) >= 2 * len(METRIC_REGISTRY) - 4, out
+        assert len(out) == 2 * len(METRIC_REGISTRY), out  # nothing skips for this fixture
         for p in out:
             assert Path(p).exists()
             assert Path(p).suffix == ".pdf"
@@ -1103,7 +1177,7 @@ def test_batch_improvement_heatmap_is_2x2_grid_without_product():
     from itcas.reporting.summary import _ordered_metrics, _plot_batch_improvement_heatmap
 
     metrics_present = _ordered_metrics()
-    assert len(metrics_present) == 4, "fixture assumes exactly 4 registered metrics"
+    assert len(metrics_present) >= 4, "fixture assumes at least 4 registered metrics"
 
     difficulties = ["p0_01", "p0_05", "p0_10", "p0_20"]
     pct_by_column = {
@@ -1134,6 +1208,18 @@ def test_batch_improvement_heatmap_is_2x2_grid_without_product():
     assert len(panel_axes) == 4, f"expected a 2x2 grid of 4 panels, got {len(panel_axes)}"
     titles = [ax.get_title() for ax in panel_axes]
     assert not any("product" in t.lower() for t in titles), f"unexpected product panel: {titles}"
+
+    from itcas.reporting.summary import _SHORT_CURVE_LABELS
+
+    def _expected_title(spec):
+        label = _SHORT_CURVE_LABELS.get(spec.key, spec.label)
+        return f"{label} {'↑' if spec.higher_is_better else '↓'}"
+
+    assert titles == [_expected_title(s) for s in metrics_present[:4]]
+    for spec in metrics_present[4:]:
+        assert _expected_title(spec) not in titles, (
+            f"metric beyond the fourth was not silently dropped: {spec.key}"
+        )
 
 
 def test_ndig_comparison_relative_auc_grid():
@@ -1367,27 +1453,39 @@ def test_ndig_kernel_ablation_comparison_end_to_end():
             assert pdf_path.stat().st_size > 0
 
 
-def test_ndig_kernel_ablation_summary_figures_are_2x2_grids():
+def test_ndig_kernel_ablation_summary_figures_are_grid_sized_to_metric_count():
     """The two ndig_kernel_ablation_comparison summary figures must each be
-    laid out as a 2x2 grid of the 4 metrics (no product panel), mirroring
-    summary._plot_relative_auc_box_grid_figure's existing 2x2 convention --
-    not the one-row-per-metric layout every other report's sibling figure
-    uses. Intercepts matplotlib.pyplot.close (called at the end of each
-    plotting function) to inspect the Figure's axes grid before it is
-    discarded, since neither function returns the Figure itself.
+    laid out as a near-square grid sized to fit every registered metric (no
+    product panel), mirroring summary._plot_relative_auc_box_grid_figure's
+    existing grid convention (summary._grid_shape) -- not the
+    one-row-per-metric layout every other report's sibling figure uses.
+    Intercepts matplotlib.pyplot.close (called at the end of each plotting
+    function) to inspect the Figure's axes grid before it is discarded,
+    since neither function returns the Figure itself.
+
+    The expected axes count is derived from ``_grid_shape(len(metrics_present))``
+    rather than a literal ``4``: as of the Localized FCHV metric (§6),
+    ``_ordered_metrics()`` returns 5 entries, laid out as a 2x3 grid (one
+    blank/axis-off cell) rather than 2x2 -- ``ax.axis("off")`` on that spare
+    cell hides its ticks/spines but does not remove it from
+    ``fig.get_axes()``, so the axes count is always ``nrows * ncols``, not
+    ``len(metrics_present)``.
     """
     import tempfile
     from pathlib import Path
     from unittest.mock import patch
 
     from itcas.reporting.summary import (
+        _grid_shape,
         _ordered_metrics,
         _plot_normalized_avg_curve_grid_figure,
         _plot_relative_auc_by_difficulty_grid_figure,
     )
 
     metrics_present = _ordered_metrics()
-    assert len(metrics_present) == 4, "fixture assumes exactly 4 registered metrics"
+    assert len(metrics_present) == 5, "fixture assumes exactly 5 registered metrics"
+    nrows, ncols = _grid_shape(len(metrics_present))
+    expected_axes = nrows * ncols
     methods = ["itcas_ndig", "ndig_no_kobj_batch", "ndig_no_kctx_batch"]
     method_styles = {
         "itcas_ndig": {"color": "#1f77b4", "linestyle": "-"},
@@ -1419,7 +1517,9 @@ def test_ndig_kernel_ablation_summary_figures_are_2x2_grids():
             relative_auc_by_level, methods, method_styles, metrics_present,
             tmp_dir / "relative_auc.pdf",
         ))
-        assert len(fig1.get_axes()) == 4, f"expected a 2x2 grid (4 axes), got {len(fig1.get_axes())}"
+        assert len(fig1.get_axes()) == expected_axes, (
+            f"expected a {nrows}x{ncols} grid ({expected_axes} axes), got {len(fig1.get_axes())}"
+        )
 
         pct_grid = [0.0, 50.0, 100.0]
         curve_lists = {spec.key: {m: [[1.0, 1.0, 1.0]] for m in methods} for spec in metrics_present}
@@ -1427,7 +1527,180 @@ def test_ndig_kernel_ablation_summary_figures_are_2x2_grids():
             pct_grid, curve_lists, methods, method_styles, metrics_present,
             tmp_dir / "normalized_curve.pdf",
         ))
-        assert len(fig2.get_axes()) == 4, f"expected a 2x2 grid (4 axes), got {len(fig2.get_axes())}"
+        assert len(fig2.get_axes()) == expected_axes, (
+            f"expected a {nrows}x{ncols} grid ({expected_axes} axes), got {len(fig2.get_axes())}"
+        )
+
+
+def test_ndig_b_component_ablation_comparison_end_to_end():
+    """Tiny fixture end-to-end check for ndig_b_component_ablation_comparison.py:
+    the split per-problem/aggregate pipeline comparing itcas_ndig (full NDIG-B)
+    against its four acquisition-component ablations (itcas_ndig_no_infogain,
+    itcas_edig, itcas_efig, itcas_ndig_pof_entropy) -- no "_with_seq" variant
+    (see module docstring).
+
+    Fixture: 2 fake synthetic problems at 2 difficulties (p0_05, p0_10).
+    itcas_ndig gets 4 feasible steps in a row, itcas_ndig_no_infogain gets 3,
+    itcas_edig gets 2, itcas_efig gets 1, itcas_ndig_pof_entropy gets 0 -- so
+    itcas_ndig's cumulative-positives curve pointwise dominates every other
+    method's in every row, guaranteeing it has the largest AUC everywhere.
+    That makes the relative-AUC ratios directly checkable: itcas_ndig must
+    hit exactly 1.0 (the row best) in every row, while all four ablations
+    must be strictly below 1.0.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from itcas.reporting import ndig_b_component_ablation_comparison as ncab
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        problems = ["fake_problem_a", "fake_problem_b"]
+
+        def write_run(problem, diff, method, seed, feasible_steps):
+            run_dir = root / problem / diff / method
+            run_dir.mkdir(parents=True, exist_ok=True)
+            name = f"{problem}__{method}__{diff}_seed{seed}"
+            n_eval_total = 2
+            lines = []
+            for i, feasible in enumerate(feasible_steps):
+                n_eval_total += 1
+                lines.append(json.dumps({
+                    "step": i + 1, "n_eval_total": n_eval_total, "n_eval_this_iter": 1,
+                    "feasible": [feasible],
+                    "x": [[0.1] * 6],
+                    "y": [[-1.0, -1.5] if feasible else [-100.0, -1.0]],
+                }))
+            (run_dir / f"{name}.jsonl").write_text("\n".join(lines) + "\n")
+            threshold_pct = float(diff[1:].replace("_", "."))
+            (run_dir / f"{name}.summary.json").write_text(json.dumps({
+                "config": {"method": method, "n_init": 2, "seed": seed,
+                           "extra": {"threshold_pct": threshold_pct}},
+                "problem": problem,
+                "n_init": 2,
+                "thresholds": [-30.0, -30.0],
+                "context_dims": [3, 4, 5],
+                "init_X": [[0.0] * 6, [0.1] * 6],
+                "init_Y": [[-1.0, -1.0], [-2.0, -2.0]],
+                "init_feasible": [True, True],
+            }))
+
+        for problem in problems:
+            for diff in ("p0_05", "p0_10"):
+                for seed in range(4):
+                    write_run(problem, diff, "itcas_ndig", seed, feasible_steps=[True, True, True, True])
+                    write_run(problem, diff, "itcas_ndig_no_infogain", seed, feasible_steps=[True, True, True])
+                    write_run(problem, diff, "itcas_edig", seed, feasible_steps=[True, True])
+                    write_run(problem, diff, "itcas_efig", seed, feasible_steps=[True])
+                    write_run(problem, diff, "itcas_ndig_pof_entropy", seed, feasible_steps=[False])
+
+        problems_config = root / "problems_config.json"
+        problems_config.write_text(json.dumps({"problems": problems, "temporary": []}))
+
+        out_dir = root / "out"
+        metrics_dir = root / "metrics"
+        auc_cache_dir = root / "auc_cache"
+
+        for problem in problems:
+            paths = ncab.summarize_ndig_b_component_ablation_problem(
+                root, problem, problems_config=problems_config,
+                save_metrics_dir=metrics_dir, auc_cache_dir=auc_cache_dir,
+            )
+            assert len(paths) == 1
+            assert Path(paths[0]).name == f"{problem}_ndig_b_component_ablation_metrics.json"
+
+        # --- Direct check of the combined relative-AUC ratios, independent
+        # of the rendered PDFs: itcas_ndig must be the row-best (ratio 1.0)
+        # everywhere, every ablation strictly below 1.0.
+        summaries_by_problem = {}
+        for f in sorted(metrics_dir.glob("*_ndig_b_component_ablation_metrics.json")):
+            problem, diffs = ncab.load_component_ablation_problem_metrics(f)
+            summaries_by_problem[problem] = diffs
+        combined = ncab._combine_component_ablation_summaries(summaries_by_problem)
+        assert set(combined) == {"p0_05", "p0_10"}
+        for diff in ("p0_05", "p0_10"):
+            ratios = combined[diff]["relative_auc_lists"]["cumulative_positives"]
+            assert all(v == 1.0 for v in ratios["itcas_ndig"])
+            assert all(v < 1.0 for v in ratios["itcas_ndig_no_infogain"])
+            assert all(v < 1.0 for v in ratios["itcas_edig"])
+            assert all(v < 1.0 for v in ratios["itcas_efig"])
+            assert all(v < 1.0 for v in ratios["itcas_ndig_pof_entropy"])
+
+        # --- End-to-end: the aggregate stage produces exactly the two
+        # documented PDFs, correctly named and non-empty.
+        paths = ncab.summarize_ndig_b_component_ablation_aggregate(metrics_dir, output_dir=out_dir)
+        names = {Path(p).name for p in paths}
+        assert names == {
+            "ndig_b_component_ablation_relative_auc_by_difficulty.pdf",
+            "ndig_b_component_ablation_normalized_avg_curve_vs_pct_budget.pdf",
+        }
+        for p in paths:
+            pdf_path = Path(p)
+            assert pdf_path.exists()
+            assert pdf_path.stat().st_size > 0
+
+
+def test_ndig_b_component_ablation_summary_figures_are_grid_sized_to_metric_count():
+    """Same near-square-grid convention (summary._grid_shape) check as
+    test_ndig_kernel_ablation_summary_figures_are_grid_sized_to_metric_count,
+    but for ndig_b_component_ablation_comparison.py's own 5-method METHODS/
+    METHOD_STYLES.
+    """
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from itcas.reporting.ndig_b_component_ablation_comparison import METHOD_STYLES, METHODS
+    from itcas.reporting.summary import (
+        _grid_shape,
+        _ordered_metrics,
+        _plot_normalized_avg_curve_grid_figure,
+        _plot_relative_auc_by_difficulty_grid_figure,
+    )
+
+    metrics_present = _ordered_metrics()
+    assert len(metrics_present) == 5, "fixture assumes exactly 5 registered metrics"
+    nrows, ncols = _grid_shape(len(metrics_present))
+    expected_axes = nrows * ncols
+
+    def _captured_fig(render_fn):
+        captured = {}
+        real_close = __import__("matplotlib.pyplot", fromlist=["close"]).close
+
+        def fake_close(fig):
+            captured["fig"] = fig
+            return real_close(fig)
+
+        with patch("matplotlib.pyplot.close", side_effect=fake_close):
+            out_path = render_fn()
+        assert out_path is not None
+        return captured["fig"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+
+        relative_auc_by_level = [
+            (diff, {spec.key: {m: [1.0] for m in METHODS} for spec in metrics_present})
+            for diff in ("p0_01", "p0_05")
+        ]
+        fig1 = _captured_fig(lambda: _plot_relative_auc_by_difficulty_grid_figure(
+            relative_auc_by_level, METHODS, METHOD_STYLES, metrics_present,
+            tmp_dir / "relative_auc.pdf",
+        ))
+        assert len(fig1.get_axes()) == expected_axes, (
+            f"expected a {nrows}x{ncols} grid ({expected_axes} axes), got {len(fig1.get_axes())}"
+        )
+
+        pct_grid = [0.0, 50.0, 100.0]
+        curve_lists = {spec.key: {m: [[1.0, 1.0, 1.0]] for m in METHODS} for spec in metrics_present}
+        fig2 = _captured_fig(lambda: _plot_normalized_avg_curve_grid_figure(
+            pct_grid, curve_lists, METHODS, METHOD_STYLES, metrics_present,
+            tmp_dir / "normalized_curve.pdf",
+        ))
+        assert len(fig2.get_axes()) == expected_axes, (
+            f"expected a {nrows}x{ncols} grid ({expected_axes} axes), got {len(fig2.get_axes())}"
+        )
 
 
 def test_forward_fill_at_carries_last_known_value():
@@ -1755,6 +2028,118 @@ def test_bes_quality_nonneg_and_differentiable():
 
     assert "bes" in available_qualities()
     assert "bes" in QUALITY_REGISTRY
+
+
+def test_ndig_no_infogain_quality_matches_ndig_depth_without_infogain_and_differentiable():
+    """NDIG-B ablation "remove information gain": q(z) must equal NDIG's
+    normalized depth term alone (no info-gain multiplier), be bounded in
+    [0, 1), non-negative, differentiable, and registered."""
+    import torch
+
+    from itcas.algorithms.quality import (
+        ndig_no_infogain_quality,
+        QUALITY_REGISTRY,
+        available_qualities,
+    )
+
+    models, bounds, tau = _tiny_gp_setup(m=2, d=2)
+    z = torch.rand(6, 2, dtype=torch.double, requires_grad=True)
+    q = ndig_no_infogain_quality(models, z, tau)
+
+    # Closed form: depth = prod_i d_i/(1+d_i), d_i = Z_i*Phi(Z_i)+phi(Z_i).
+    depth = torch.ones(6, dtype=torch.double)
+    for gp, tau_i in zip(models, tau):
+        post = gp.posterior(z)
+        mu_i = post.mean.squeeze(-1)
+        sigma_i = post.variance.clamp_min(1e-12).sqrt().squeeze(-1)
+        z_i = (mu_i - tau_i) / sigma_i
+        normal = torch.distributions.Normal(0.0, 1.0)
+        phi_z = torch.exp(normal.log_prob(z_i))
+        Phi_z = normal.cdf(z_i)
+        d_i = z_i * Phi_z + phi_z
+        depth = depth * (d_i / (1.0 + d_i))
+    assert torch.allclose(q, depth)
+
+    assert float(q.min().detach()) >= 0.0
+    assert float(q.max().detach()) < 1.0
+
+    g = torch.autograd.grad(q.sum(), z)[0]
+    assert g.shape == z.shape and torch.isfinite(g).all()
+
+    assert "ndig_no_infogain" in available_qualities()
+    assert "ndig_no_infogain" in QUALITY_REGISTRY
+
+
+def test_ndig_pof_entropy_quality_matches_binary_entropy_of_pof_and_differentiable():
+    """NDIG-B ablation "binary entropy of PoF": q(z) must equal the base-2
+    binary entropy of the joint Probability of Feasibility, be bounded in
+    [0, 1], differentiable, and registered."""
+    import torch
+
+    from itcas.algorithms.quality import (
+        ndig_pof_entropy_quality,
+        QUALITY_REGISTRY,
+        available_qualities,
+    )
+    from itcas.algorithms.roi_mi import (
+        _binary_entropy,
+        feasibility_probabilities,
+        joint_feasibility_probability,
+    )
+
+    models, bounds, tau = _tiny_gp_setup(m=2, d=2)
+    z = torch.rand(6, 2, dtype=torch.double, requires_grad=True)
+    q = ndig_pof_entropy_quality(models, z, tau)
+
+    mus, sigmas = [], []
+    for gp in models:
+        post = gp.posterior(z)
+        mu_i = post.mean.squeeze(-1)
+        var_i = post.variance.clamp_min(1e-12).squeeze(-1)
+        mus.append(mu_i)
+        sigmas.append(var_i.sqrt())
+    mu = torch.stack(mus, dim=-1)
+    sigma = torch.stack(sigmas, dim=-1)
+    pof = joint_feasibility_probability(feasibility_probabilities(mu, sigma, tau))
+    expected = _binary_entropy(pof)
+    assert torch.allclose(q, expected)
+
+    assert float(q.min().detach()) >= 0.0
+    assert float(q.max().detach()) <= 1.0
+
+    g = torch.autograd.grad(q.sum(), z)[0]
+    assert g.shape == z.shape and torch.isfinite(g).all()
+
+    assert "ndig_pof_entropy" in available_qualities()
+    assert "ndig_pof_entropy" in QUALITY_REGISTRY
+
+
+def test_ndig_b_component_ablation_qualities_are_continuous_batch_siblings():
+    """--method itcas --quality ndig_no_infogain / ndig_pof_entropy must
+    route through the same continuous QD-DPP machinery as plain ndig,
+    honoring --batch_size like any other itcas quality variant."""
+    import torch
+    from itcas.pipeline.loop import _select_continuous, ExperimentConfig
+    from itcas.pipeline import PROBLEM_REGISTRY
+    from itcas.utils.device import resolve_device
+    from itcas.utils.gp import build_independent_gps
+
+    problem = PROBLEM_REGISTRY["two_circles_2d"]()
+    device = resolve_device("cpu")
+    bounds = problem.bounds.to(device=device, dtype=torch.double)
+    h = problem.thresholds.to(device=device, dtype=torch.double)
+    X = problem.sample_uniform(6, seed=0, device=device, dtype=torch.double)
+    Y = problem.evaluate(X).to(torch.double)
+    models = build_independent_gps(X, Y, bounds=bounds)
+
+    for quality in ("ndig_no_infogain", "ndig_pof_entropy"):
+        cfg = ExperimentConfig(method="itcas", quality=quality, batch_size=2)
+        X_new, info = _select_continuous(
+            models=models, bounds=bounds, h=h, batch_size=2, cfg=cfg,
+            context_dims=problem.context_dims, seed=0,
+        )
+        assert X_new.shape[0] == 2
+        assert info.get("quality") == quality
 
 
 def test_straddle_score_depends_only_on_active_objective():

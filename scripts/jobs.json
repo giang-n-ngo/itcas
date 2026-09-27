@@ -38,7 +38,40 @@
         "quality": [
         ],
         "seeds": "0-19",
-        "n_concurrent": 4
+        "n_concurrent": 8
+      },
+      {
+        "_comment": "Same 15 synthetic problems: the reviewer-requested NDIG-B acquisition-*component* ablations (orthogonal to the QD-DPP batch-diversity kernel ablations above, which touch the DPP kernel, not the quality score). All five use method='itcas' with --quality varying: 'ndig' is the proposed method itself (itcas_ndig), 'ndig_no_infogain' removes the info-gain multiplier (leaves normalized depth alone), 'edig' removes the depth-normalization step (unbounded depth times info gain, reused unchanged), 'efig' is PoF times info gain (reused unchanged), 'ndig_pof_entropy' is the binary entropy of the joint PoF (no depth/info-gain term at all). See itcas/algorithms/quality.py's 'NDIG-B component ablations' docstring section / itcas/reporting/ndig_b_component_ablation_comparison.py, which shows all five together.",
+        "methods": [
+          "itcas"
+        ],
+        "problems": [
+          "all_valley_8d",
+          "alpine_12d",
+          "dtlz1_12d",
+          "dtlz2_6d",
+          "dtlz3_8d",
+          "ellipsoid_rastrigin_20d",
+          "griewank_16d",
+          "heterogeneous_quadrants_6d",
+          "levy_16d",
+          "multimodal_trap_20d",
+          "schwefel_styblinski_sphere_20d",
+          "styblinski_tang_6d",
+          "rastrigin_griewank_sphere_20d",
+          "styblinski_tang_levy_10d",
+          "zdt3_6d"
+        ],
+        "difficulties": [0.01, 0.05, 0.1, 0.2],
+        "quality": [
+          "ndig",
+          "ndig_no_infogain",
+          "edig",
+          "efig",
+          "ndig_pof_entropy"
+        ],
+        "seeds": "0-19",
+        "n_concurrent": 8
       }
     ]
   }

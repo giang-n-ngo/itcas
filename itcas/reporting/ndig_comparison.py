@@ -19,13 +19,16 @@ only ever shows the two methods above (see :data:`METHODS`, and
 :data:`itcas.reporting.method_labels.METHOD_ABBREVIATIONS` for both methods'
 short display labels, both already registered there).
 
-**The one output: a 2x2 relative-AUC boxplot.** A single PDF
+**The one output: a relative-AUC boxplot grid.** A single PDF
 (``ndig_comparison_relative_auc_vs_synthetic_benchmarks.pdf``) via
 :func:`itcas.reporting.ranking.relative_auc_ratio_lists_over_rows` and
-:func:`itcas.reporting.summary._plot_relative_auc_box_grid_figure`: a 2x2
-grid, one panel per metric (**no product panel** -- exactly the four metrics
-:func:`itcas.reporting.summary._ordered_metrics` registers, never five), each
-panel a horizontal boxplot with one box per method (``itcas_ndig``,
+:func:`itcas.reporting.summary._plot_relative_auc_box_grid_figure`: a
+near-square grid (:func:`itcas.reporting.summary._grid_shape`), one panel
+per metric actually present in the data (**no product panel** -- up to
+however many :func:`itcas.reporting.summary._ordered_metrics` registers;
+a 2x2 grid when that's four, growing automatically if more are ever
+registered), each panel a horizontal boxplot with one box per method
+(``itcas_ndig``,
 ``itcas_seq_ndig``) showing that method's relative-AUC ratio spread. This
 replaces the previous version's curve-grid PDFs, avg-rank figure, and
 Friedman/Wilcoxon stats report entirely -- this module now produces exactly

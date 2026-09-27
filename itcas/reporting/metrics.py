@@ -9,7 +9,10 @@ The plotted metrics are (see ``contexts/metrics.md``):
 * ``cumulative_positives`` — Number of Positives ``P(t)``;
 * ``feasible_context_fill_distance`` (FCFD);
 * ``feasible_convex_hull_volume`` (FCHV);
-* ``epsilon_archive_size`` (ε-Archive Size).
+* ``epsilon_archive_size`` (ε-Archive Size);
+* ``localized_feasible_convex_hull_volume`` — Localized (Context-Conditioned)
+  FCHV (§6), the mean per-region FCHV over a fixed number of K-means regions
+  fit on every evaluated context.
 
 AUP is a single number (``sum_t P(t)``) and is deliberately *not* a curve, so it
 is not part of the plotting registry.
@@ -26,10 +29,12 @@ from typing import Optional
 import torch
 
 from ..metrics import (
+    LOCALIZED_FCHV_K,
     epsilon_archive_size,
     feasible_context_fill_distance,
     feasible_convex_hull_volume,
     is_feasible,
+    localized_feasible_convex_hull_volume,
     transform_feasible_for_archive,
 )
 from ..metrics.reference import ReferenceData, build_reference_data
@@ -174,6 +179,57 @@ def feasible_convex_hull_volume_curve(run: RunSeries) -> list[float]:
         if n != prev_feas_n:
             cached_val = feasible_convex_hull_volume(disc)
             prev_feas_n = n
+        out.append(cached_val)
+    return out
+
+
+def localized_feasible_convex_hull_volume_curve(
+    run: RunSeries, *, k: int = LOCALIZED_FCHV_K, seed: Optional[int] = None
+) -> Optional[list[float]]:
+    """Localized (context-conditioned) FCHV curve, `contexts/metrics.md` §6.
+
+    Returns ``None`` when ``run.context_dims`` is empty -- a problem with no
+    context dimensions has nothing to partition into K-means regions,
+    mirroring :func:`feasible_context_fill_distance_curve`'s own
+    ``needs_context`` handling (see ``MetricSpec.needs_context``).
+
+    ``seed`` defaults to ``run.seed`` (the trial's own seed) when not given
+    explicitly, matching ``itcas.pipeline.loop.run_experiment``'s own
+    ``cfg.seed``-seeded final-value computation, so recomputing this curve
+    offline from a logged run reproduces the same K-means partition (and
+    hence the same final value) the live run itself would have reported.
+
+    Unlike :func:`feasible_convex_hull_volume_curve`'s skip-if-unchanged
+    cache (keyed only on the feasible-point count), the K-means partition
+    here is fit on *every* evaluated context (not just the feasible subset),
+    so the cache key must also change whenever the total evaluated count
+    grows -- even on a step where no new feasible point was found, a newly
+    evaluated (infeasible) point can still shift the K-means partition and
+    hence which region an already-discovered feasible point falls into.
+    """
+    cdims = list(run.context_dims)
+    if not cdims:
+        return None
+    resolved_seed = int(run.seed) if seed is None else int(seed)
+    out: list[float] = []
+    prev_key: Optional[tuple[int, int]] = None
+    cached_val = 0.0
+    for X, Y in zip(run.X_per_step, run.Y_per_step):
+        if X.numel() == 0 or Y.numel() == 0:
+            out.append(0.0)
+            prev_key = (0, 0)
+            cached_val = 0.0
+            continue
+        mask = is_feasible(Y, run.thresholds)
+        feas_Y = Y[mask] if bool(mask.any()) else Y[:0]
+        key = (int(feas_Y.shape[0]), int(X.shape[0]))
+        if key != prev_key:
+            feas_ctx = X[mask][:, cdims] if bool(mask.any()) else X[:0, cdims]
+            all_ctx = X[:, cdims]
+            cached_val = localized_feasible_convex_hull_volume(
+                feas_Y, feas_ctx, all_ctx, k=k, seed=resolved_seed
+            )
+            prev_key = key
         out.append(cached_val)
     return out
 
@@ -351,6 +407,12 @@ REGISTRY: dict[str, MetricSpec] = {
         "epsilon_archive_size", "ε-Archive Size (higher is better)",
         higher_is_better=True,
     ),
+    "localized_feasible_convex_hull_volume": MetricSpec(
+        "localized_feasible_convex_hull_volume",
+        "Localized feasible convex hull volume (higher is better)",
+        needs_context=True,
+        higher_is_better=True,
+    ),
 }
 
 
@@ -369,6 +431,8 @@ def compute_metric(
         return feasible_convex_hull_volume_curve(run)
     if key == "epsilon_archive_size":
         return epsilon_archive_size_curve(run)
+    if key == "localized_feasible_convex_hull_volume":
+        return localized_feasible_convex_hull_volume_curve(run)
     if ref is None:
         return None
     if key == "feasible_context_fill_distance":

@@ -53,6 +53,37 @@ Currently registered variants (see ``methodology.tex``):
     Preserves EDIG's interior-pull and cold-start robustness while restoring
     the DPP's ability to enforce context-space diversity (CFD/FCFD).
 
+NDIG-B component ablations (reviewer-requested; see ``--method itcas
+    --quality <name>``, batch-labeled ``itcas_<name>`` by ``reporting/
+    visualize.py``, compared in ``reporting/ndig_b_component_ablation_
+    comparison.py``):
+
+    - "Remove information gain" -> ``ndig_no_infogain``: NDIG's normalized
+      depth term alone, dropping the info-gain multiplier entirely.
+    - "Remove normalization of expected depth" -> reuses ``edig`` unchanged
+      (EDIG *is* NDIG's unbounded, unnormalized depth term times info gain).
+    - "PoF times information gain" -> reuses ``efig`` unchanged (EFIG *is*
+      exactly this formulation).
+    - "Binary entropy of PoF" -> ``ndig_pof_entropy``: the base-2 binary
+      entropy of the joint Probability of Feasibility, with no info-gain
+      term at all.
+
+``ndig_no_infogain`` -- NDIG with the information-gain multiplier removed,
+    isolating the contribution of the normalized depth term alone::
+
+        d_i    = Z_i * Phi(Z_i) + phi(Z_i)
+        depth  = prod_i d_i / (1 + d_i)          # -> [0, 1)
+        q(z)   = depth
+
+``ndig_pof_entropy`` -- Replaces NDIG's depth * info-gain product with the
+    base-2 binary entropy of the joint Probability of Feasibility, isolating
+    a pure feasibility-boundary-seeking signal with no depth or info-gain
+    term::
+
+        p_i(z) = Phi((mu_i - tau_i) / sigma_i)
+        p(z)   = prod_i p_i(z)
+        q(z)   = -[p(z) log2 p(z) + (1-p(z)) log2(1-p(z))]
+
 ``cr_ndig`` -- Context-Repulsive NDIG (see ``contexts/sequential_ndig.md``).
     A purely *sequential* variant (batch_size always forced to 1 -- no QD-DPP
     is available to enforce context-space diversity between candidates within
@@ -128,6 +159,7 @@ from torch.distributions import Normal as _Normal
 from ..utils.gp import observation_noise
 from .qd_dpp import median_heuristic_lambda
 from .roi_mi import (
+    _binary_entropy,
     feasibility_probabilities,
     joint_feasibility_probability,
 )
@@ -393,6 +425,103 @@ def _build_ndig(
         return ndig_quality(models, z, tau)
 
     info = {"quality": "ndig", "ref_set_size": 0, "cold_start": False}
+    return q, info
+
+
+# ---------------------------------------------------------------------------
+# NDIG-B component ablations: remove info gain / replace depth*IG with PoF entropy
+# ---------------------------------------------------------------------------
+def ndig_no_infogain_quality(
+    models: Sequence[SingleTaskGP],
+    Z_eval: torch.Tensor,
+    h: torch.Tensor,
+) -> torch.Tensor:
+    """Differentiable NDIG quality with the information-gain multiplier removed.
+
+    Ablation of NDIG-B's "remove information gain" component: the normalized
+    depth term alone, with no info-gain multiplier::
+
+        Z_i   = (mu_{t,i}(z) - tau_i) / sigma_{t,i}(z)
+        d_i   = Z_i * Phi(Z_i) + phi(Z_i)      # EDIG depth per objective
+        depth = prod_i d_i / (1 + d_i)         # rational squash -> [0, 1)
+        q(z)  = depth
+
+    Returns ``(N,)``.
+    """
+    depth = torch.ones(Z_eval.shape[0], dtype=Z_eval.dtype, device=Z_eval.device)
+    for gp, tau_i in zip(models, h):
+        post = gp.posterior(Z_eval)
+        mu_i = post.mean.squeeze(-1)                        # (N,)
+        var_i = post.variance.clamp_min(_EPS).squeeze(-1)  # (N,)
+        sigma_i = var_i.sqrt()                              # (N,)
+        z_i = (mu_i - tau_i) / sigma_i                     # (N,)
+        phi_z = torch.exp(_STDNORM.log_prob(z_i))          # phi(Z_i)
+        Phi_z = _STDNORM.cdf(z_i)                          # Phi(Z_i)
+        d_i = z_i * Phi_z + phi_z                          # EDIG depth per obj
+        depth = depth * (d_i / (1.0 + d_i))                # rational squash
+    return depth
+
+
+@register_quality("ndig_no_infogain")
+def _build_ndig_no_infogain(
+    models: Sequence[SingleTaskGP],
+    bounds: torch.Tensor,
+    tau: torch.Tensor,
+    **_: object,
+) -> tuple[QualityFn, dict]:
+    """NDIG-B ablation provider: normalized depth alone, no info-gain term."""
+
+    def q(z: torch.Tensor) -> torch.Tensor:
+        return ndig_no_infogain_quality(models, z, tau)
+
+    info = {"quality": "ndig_no_infogain", "ref_set_size": 0, "cold_start": False}
+    return q, info
+
+
+def ndig_pof_entropy_quality(
+    models: Sequence[SingleTaskGP],
+    Z_eval: torch.Tensor,
+    h: torch.Tensor,
+) -> torch.Tensor:
+    """Differentiable binary entropy of the joint Probability of Feasibility.
+
+    Ablation of NDIG-B's "binary entropy of PoF" component: replaces the
+    depth * info-gain product entirely with the base-2 binary entropy of the
+    joint PoF, so the score is highest exactly where PoF is least certain
+    (near the feasibility boundary) rather than deep in the interior::
+
+        p_i(z) = Phi((mu_{t,i}(z) - tau_i) / sigma_{t,i}(z))
+        p(z)   = prod_i p_i(z)
+        q(z)   = -[p(z) log2 p(z) + (1-p(z)) log2(1-p(z))]
+
+    Returns ``(N,)``.
+    """
+    mus, sigmas = [], []
+    for gp in models:
+        post = gp.posterior(Z_eval)
+        mu_i = post.mean.squeeze(-1)
+        var_i = post.variance.clamp_min(_EPS).squeeze(-1)
+        mus.append(mu_i)
+        sigmas.append(var_i.sqrt())
+    mu = torch.stack(mus, dim=-1)       # (N, m)
+    sigma = torch.stack(sigmas, dim=-1)  # (N, m)
+    pof = joint_feasibility_probability(feasibility_probabilities(mu, sigma, h))
+    return _binary_entropy(pof)
+
+
+@register_quality("ndig_pof_entropy")
+def _build_ndig_pof_entropy(
+    models: Sequence[SingleTaskGP],
+    bounds: torch.Tensor,
+    tau: torch.Tensor,
+    **_: object,
+) -> tuple[QualityFn, dict]:
+    """NDIG-B ablation provider: binary entropy of joint PoF, no depth/info-gain."""
+
+    def q(z: torch.Tensor) -> torch.Tensor:
+        return ndig_pof_entropy_quality(models, z, tau)
+
+    info = {"quality": "ndig_pof_entropy", "ref_set_size": 0, "cold_start": False}
     return q, info
 
 

@@ -1,4 +1,5 @@
 from .metrics import (  # noqa: F401
+    LOCALIZED_FCHV_K,
     aup,
     context_fill_distance,
     cumulative_positives,
@@ -6,6 +7,7 @@ from .metrics import (  # noqa: F401
     feasible_context_fill_distance,
     feasible_convex_hull_volume,
     is_feasible,
+    localized_feasible_convex_hull_volume,
     positive_samples,
     transform_feasible_for_archive,
 )

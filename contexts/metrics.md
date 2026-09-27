@@ -117,6 +117,7 @@ Note on Percentile Tuning: with the corrected within-trial-gap population, a *lo
 #### **5. Number of Positives (Sample Count)**
 
 **What it is:** A strict, cumulative count of how many evaluated $(x, c)$ pairs successfully satisfied all multi-objective constraints.
+
 **Implementation Logic:**
 
 1. Initialize a counter `positives = 0`.
@@ -126,6 +127,31 @@ Note on Percentile Tuning: with the corrected within-trial-gap population, a *lo
 
 
 3. Track this cumulative sum over the timeline of iterations $t = 1 \dots T$.
+
+#### **6. Localized Context-Conditioned Feasible Convex Hull Volume**
+
+**What it is:** Localised Context-Conditioned Feasible Convex Hull Volume (FCHV) evaluates the objective-space diversity of an algorithm across distinct environmental regions. 
+It builds upon the global FCHV, which calculates the $m$-dimensional Lebesgue measure of the convex hull of $Y_{feasible}$. 
+By calculating volume within partitioned local context bins rather than pooling all discoveries into a single global set, this metric prevents an algorithm from artificially inflating its score by generating massive objective diversity in a single trivial context while leaving the broader environment space empty. 
+
+**Implementation Logic**
+
+Step 1: Isolate Feasible Points. 
+Filter all evaluated design-context-objective tuples, $D_T = \{(x_t, c_t, y_t)\}_{t=1}^T$, to retain only strictly feasible points where $f_i(x_t, c_t) \ge \tau_i$ for all objectives $i \in \{1, \dots, m\}$.   
+
+Step 2: Context Space Partitioning. 
+Define $K$ distinct local regions within the context space $C$. 
+This can be achieved dynamically using a clustering algorithm (e.g., K-means fit on the evaluated context vectors $c_t$) or statically using a predefined spatial grid.
+Prefer a grid for simplicity.
+
+Step 3: Local Assignment. 
+Distribute the feasible objective vectors into local sets, $Y_{feasible, k}$, by mapping each corresponding context vector $c_t$ to its assigned bin $k \in \{1, \dots, K\}$.
+
+Step 4: Local Volume Calculation. For each context bin $k$, compute the localized convex hull volume $V_k = Vol(Conv(Y_{feasible, k}))$. 
+If a bin contains insufficient points to form a valid $m$-dimensional hull (typically requiring at least $m+1$ non-coplanar points), set $V_k = 0$.
+
+Step 5: Aggregation. 
+Compute the final scalar metric by taking the mean of the localized volumes: $FCHV_{cond} = \frac{1}{K} \sum_{k=1}^K V_k$.
 
 ---
 

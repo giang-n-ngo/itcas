@@ -148,14 +148,26 @@ def short(m: str) -> str:
 
 rows = [(m, short(m)) for m in sorted(methods)]
 
+# Short, stable aliases for quality names whose first 3 characters collide
+# with a sibling's (e.g. the NDIG-B component ablations: "ndig",
+# "ndig_no_infogain", "ndig_pof_entropy" all start with "ndi") -- see the
+# generic dedupe_labels() safety net below, which still catches anything not
+# hand-covered here so a future, unrecognized quality can never silently
+# share a column header with an existing one.
+QUALITY_ALIAS = {
+    "roi_mi": "roi", "edig": "edi", "efig": "efi",
+    "ndig": "ndg", "ndig_no_infogain": "nig", "ndig_pof_entropy": "npe",
+}
+
 EXCLUDE_QUALITIES = {"c2lse", "bes", "interior_sampling", "cr_ndig"}
 for q in sorted(set(QUALITY_REGISTRY) - EXCLUDE_QUALITIES):
-    rows.append((f"itcas/{q}", f"i.{q[:3]}"))
+    q_short = QUALITY_ALIAS.get(q, q[:3])
+    rows.append((f"itcas/{q}", f"i.{q_short}"))
     # itcas_seq shares the same cfg.quality machinery as itcas (see
     # pipeline/loop.py's `base in ("itcas", "itcas_seq")` checks) but is
     # always forced to batch_size=1, so every quality variant gets a
     # sequential column too.
-    rows.append((f"itcas_seq/{q}", f"is.{q[:3]}"))
+    rows.append((f"itcas_seq/{q}", f"is.{q_short}"))
 
 def is_valid_two_stage(m: str) -> bool:
     try:
@@ -190,6 +202,22 @@ else:
             f"in the Python registries: {unknown}"
         )
     rows = curated_rows
+
+# Final collision safety net: two DIFFERENT full method/quality names must
+# never render the same short column header (silently unreadable -- see
+# QUALITY_ALIAS above, added after "ndig"/"ndig_no_infogain"/
+# "ndig_pof_entropy" all truncated to "i.ndi"). Anything not hand-aliased
+# still gets deduped here instead of breaking, matching this file's existing
+# "prettier, never required" philosophy for BASE_ALIAS/QUALITY_ALIAS.
+def dedupe_labels(rows):
+    seen: dict[str, int] = {}
+    out = []
+    for name, label in rows:
+        seen[label] = seen.get(label, 0) + 1
+        out.append((name, label if seen[label] == 1 else f"{label}{seen[label]}"))
+    return out
+
+rows = dedupe_labels(rows)
 
 for m, s in rows:
     print(f"{m} {s}")

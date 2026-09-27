@@ -40,6 +40,13 @@ METHOD_ABBREVIATIONS: dict[str, str] = {
     # ndig_kernel_ablation_comparison.py, which shows all three together.
     "ndig_no_kobj_batch": "NDIG-B (no k_obj)",
     "ndig_no_kctx_batch": "NDIG-B (no k_ctx)",
+    # NDIG-B's own acquisition-*component* ablations (reviewer-requested;
+    # orthogonal to the QD-DPP kernel ablations above) -- see
+    # ndig_b_component_ablation_comparison.py, which shows all five together.
+    "itcas_ndig_no_infogain": "NDIG-B (no info gain)",
+    "itcas_edig": "NDIG-B (no depth norm)",
+    "itcas_efig": "NDIG-B (PoF x IG)",
+    "itcas_ndig_pof_entropy": "NDIG-B (PoF entropy)",
 }
 
 

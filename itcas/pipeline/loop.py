@@ -29,12 +29,14 @@ from ..algorithms import itcas_select_batch
 from ..baselines import REGISTRY as BASELINES
 from ..io import RunLogger
 from ..metrics import (
+    LOCALIZED_FCHV_K,
     aup,
     cumulative_positives,
     epsilon_archive_size,
     feasible_context_fill_distance,
     feasible_convex_hull_volume,
     is_feasible,
+    localized_feasible_convex_hull_volume,
     positive_samples,
 )
 from ..metrics.reference import build_reference_data
@@ -774,11 +776,24 @@ def run_experiment(problem: Problem, cfg: ExperimentConfig) -> dict:
     ref = build_reference_data(problem, seed=cfg.seed, thresholds=h.cpu())
     feas_mask = is_feasible(Y, h)
     cdims = list(problem.context_dims)
-    if cdims and ref.context_ref is not None:
-        ctx_ref = ref.context_ref.to(device=device, dtype=torch.double)
+    if cdims:
         feas_ctx = X[feas_mask][:, cdims] if bool(feas_mask.any()) else X[:0, cdims]
-        summary["feasible_context_fill_distance"] = feasible_context_fill_distance(
-            feas_ctx, ctx_ref, penalty=ref.context_penalty
+        if ref.context_ref is not None:
+            ctx_ref = ref.context_ref.to(device=device, dtype=torch.double)
+            summary["feasible_context_fill_distance"] = feasible_context_fill_distance(
+                feas_ctx, ctx_ref, penalty=ref.context_penalty
+            )
+        # Localized (context-conditioned) FCHV needs no reference set -- it
+        # partitions the context space it actually saw (`X[:, cdims]`, every
+        # evaluated context, feasible or not) via K-means, so it is computed
+        # whenever the problem has context dims at all, independent of
+        # whether a reference context set was built above.
+        summary["localized_feasible_convex_hull_volume"] = localized_feasible_convex_hull_volume(
+            Y[feas_mask] if bool(feas_mask.any()) else Y[:0],
+            feas_ctx,
+            X[:, cdims],
+            k=LOCALIZED_FCHV_K,
+            seed=cfg.seed,
         )
     disc_Y = Y[feas_mask] if bool(feas_mask.any()) else Y[:0]
     summary["feasible_convex_hull_volume"] = feasible_convex_hull_volume(disc_Y)
